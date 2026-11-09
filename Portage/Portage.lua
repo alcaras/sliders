@@ -13,6 +13,7 @@
 --   Party: UnitInPartyShard (no flag) and UnitPhaseReason (identity flag, L.Value) for player and party1..4.
 --   Shard moves: SHARD_TRANSFER_IMMINENT (+ GetEvictionTimeRemaining), SHARD_TRANSFER_CANCELLED, SHARD_TRANSFER.
 --   Party exchange, to learn whether two clients see the same key: "S1;<uiMapID>;<key>;<ageSec>" over PARTY only.
+--   Ping test (0.2): /portage ping sends P1 over guild, the PortageTest channel, whispers and Battle.net; R1 answers.
 local _, ns = ...
 local L = ns.L
 
@@ -285,6 +286,17 @@ local function onAddonMessage(_, prefix, body, channel, sender)
 	local first = sender:match("^[^%s%-]+") or sender
 	if first == L.Value((UnitName("player"))) then return end
 	local v, id, key, age = strsplit(";", body)
+	if v == "P1" or v == "R1" then
+		ns.onPing(v, id, key, age, channel, first, function(msg)
+			if channel == "WHISPER" then return ns.sendRoute("WHISPER", msg, sender) end
+			if channel == "CHANNEL" then
+				local ch = ns.channelID()
+				return ch and ns.sendRoute("CHANNEL", msg, tostring(ch)) or "not joined"
+			end
+			return ns.sendRoute(channel, msg)
+		end)
+		return
+	end
 	if v ~= "S1" or not key then return end
 	local known = peers[first]
 	peers[first] = { key = key, map = tonumber(id), t = now(), age = tonumber(age) }
@@ -292,6 +304,138 @@ local function onAddonMessage(_, prefix, body, channel, sender)
 		current == nil and "we have none" or (current == key and "same" or "differs")))
 	if not known then send() end   -- a new peer gets ours once (throttled)
 end
+
+-- ---------------------------------------------------------------- ping (0.2): which routes reach a friend on another shard
+-- /portage ping [name] sends one P1 over every route there is: guild, party, the PortageTest channel, a whisper to
+-- each online character friend (and to [name]), Battle.net game data to each Battle.net friend in this game. Each
+-- receiver logs it, says it in chat and answers R1 over the route it came by. Nothing is sent but on that command and
+-- as its answer; the log keeps each route's send result (offline, throttled ...) for docs/shards.md question 10.
+local CHANNEL = "PortageTest"
+local ROUTES = { GUILD = "guild", PARTY = "party", RAID = "raid", INSTANCE_CHAT = "instance", WHISPER = "whisper",
+	CHANNEL = "channel", BN = "Battle.net" }
+local RESULTS = { [1] = "bad prefix", [2] = "bad message", [3] = "throttled", [4] = "bad route", [5] = "not in a group",
+	[6] = "no target", [7] = "no channel", [8] = "channel throttled", [9] = "error", [10] = "no guild",
+	[11] = "chat locked", [12] = "offline" }
+local lastPing, answered = -100, {}
+
+function ns.channelID()
+	local id = L.Num(L.Read(GetChannelName, CHANNEL))
+	return id and id > 0 and id or nil
+end
+
+local function joinChannel()
+	if not db or db.channel == false or ns.channelID() or type(JoinTemporaryChannel) ~= "function" then return end
+	local ok = pcall(JoinTemporaryChannel, CHANNEL)   -- pcall: a full channel list refuses
+	log(ok and ns.channelID() and "channel joined" or "channel join failed")
+end
+
+-- "ok", or why not (the SendAddonMessageResult in words)
+function ns.sendRoute(route, msg, target)
+	local ok, r
+	if route == "BN" then
+		if not (C_BattleNet and C_BattleNet.SendGameData) then return "no Battle.net" end
+		ok, r = pcall(C_BattleNet.SendGameData, target, PREFIX, msg)
+	else
+		if not (C_ChatInfo and C_ChatInfo.SendAddonMessage) then return "no addon messages" end
+		ok, r = pcall(C_ChatInfo.SendAddonMessage, PREFIX, msg, route, target)
+	end
+	if not ok then return "error" end
+	r = L.Num(r)
+	if r == nil or r == 0 then return "ok" end   -- some builds return nothing on success
+	return RESULTS[r] or ("result " .. r)
+end
+
+local function charFriends()
+	local out = {}
+	local n = C_FriendList and L.Num(L.Read(C_FriendList.GetNumFriends)) or 0
+	for i = 1, math.min(n, 100) do
+		local f = L.Read(C_FriendList.GetFriendInfoByIndex, i)
+		local name = type(f) == "table" and L.Value(f.name)
+		if type(name) == "string" and L.Value(f.connected) == true then out[#out + 1] = name end
+	end
+	return out
+end
+
+local function bnFriends()
+	local out = {}
+	if not (C_BattleNet and C_BattleNet.GetFriendAccountInfo) then return out end
+	local n = L.Num(L.Read(BNGetNumFriends)) or 0
+	local same = FriendsListUtil and FriendsListUtil.IsPlayingSameWoWProject
+	for i = 1, math.min(n, 200) do
+		local a = L.Read(C_BattleNet.GetFriendAccountInfo, i)
+		local g = type(a) == "table" and a.gameAccountInfo
+		local id = type(g) == "table" and L.Num(g.gameAccountID)
+		if id and L.Value(g.isOnline) == true and (not same or L.Read(same, g) == true) then
+			local name = L.Value(g.characterName)
+			out[#out + 1] = { id = id, name = type(name) == "string" and name or ("account " .. id) }
+		end
+	end
+	return out
+end
+
+local function ping(arg)
+	if now() - lastPing < 10 then P("one ping per 10 seconds.") return end
+	if lockdown() then P("chat is locked for addons right now (a boss fight or a rated match); try after it.") return end
+	lastPing = now()
+	local id = tostring(math.floor(stamp()))
+	local msg = ("P1;%s;%d;%s"):format(id, mapID() or 0, current or "-")
+	local parts, n = {}, 0
+	local function try(label, route, target)
+		local r = ns.sendRoute(route, msg, target)
+		parts[#parts + 1] = label .. " " .. r
+		if r == "ok" then n = n + 1 end
+	end
+	if L.Read(IsInGuild) == true then try("guild", "GUILD") end
+	if inGroup() then try("party", "PARTY") end
+	local ch = ns.channelID()
+	if ch then try("channel", "CHANNEL", tostring(ch)) else parts[#parts + 1] = "channel not joined" end
+	local seen = {}
+	if arg ~= "" then seen[arg] = true try("whisper " .. arg, "WHISPER", arg) end
+	for _, name in ipairs(charFriends()) do
+		if not seen[name] then seen[name] = true try("whisper " .. name, "WHISPER", name) end
+	end
+	for _, f in ipairs(bnFriends()) do try("Battle.net " .. f.name, "BN", f.id) end
+	log(("ping %s sent: %s"):format(id, table.concat(parts, ", ")))
+	P(("ping sent by %d routes: %s. Answers show up here."):format(n, table.concat(parts, ", ")))
+end
+
+local function compare(key)
+	if key == nil or key == "-" then return "they have no shard yet" end
+	if current == nil then return "you have none yet" end
+	return key == current and "the same key as you" or "a different key from yours"
+end
+ns.compare = compare
+
+function ns.onPing(v, id, map, key, route, from, reply)
+	if type(id) ~= "string" then return end
+	local how = ROUTES[route] or tostring(route)
+	key = key or "-"
+	local state = key == "-" and "none" or (current == nil and "we have none" or (key == current and "same" or "differs"))
+	log(("%s %s by %s from %s map %s key %s ours %s (%s)"):format(v == "P1" and "ping_in" or "pong", id, how, from,
+		tostring(map), key, current or "-", state))
+	if key ~= "-" then peers[from] = { key = key, map = tonumber(map), t = now(), how = how } end
+	if v == "R1" then
+		P(("%s answered by %s: %s, %s."):format(from, how, key, compare(key)))
+		return
+	end
+	P(("%s pinged you by %s: %s, %s."):format(from, how, key, compare(key)))
+	local k = id .. route .. from
+	if answered[k] or lockdown() then return end
+	answered[k] = true
+	local r = reply(("R1;%s;%d;%s"):format(id, mapID() or 0, current or "-"))
+	if r ~= "ok" then log(("pong_failed %s by %s to %s: %s"):format(id, how, from, r)) end
+end
+
+L.On("BN_CHAT_MSG_ADDON", function(_, prefix, body, _, senderID)
+	prefix, body, senderID = L.Value(prefix), L.Value(body), L.Num(senderID)
+	if prefix ~= PREFIX or type(body) ~= "string" or not senderID then return end
+	local v, id, map, key = strsplit(";", body)
+	if v ~= "P1" and v ~= "R1" then return end
+	local info = C_BattleNet and L.Read(C_BattleNet.GetGameAccountInfoByID, senderID)
+	local name = type(info) == "table" and L.Value(info.characterName)
+	ns.onPing(v, id, map, key, "BN", type(name) == "string" and name or ("account " .. senderID),
+		function(msg) return ns.sendRoute("BN", msg, senderID) end)
+end, "bn")
 
 -- ---------------------------------------------------------------- keys
 local function reset(why)
@@ -450,17 +594,19 @@ local function statusLines()
 		local state
 		if current and not stale() then state = "confirmed " .. age(now() - currentSince) .. " ago"
 		elseif current then state = "stale: no reading for " .. age(now() - (lastRead or now()))
-		else state = "not confirmed yet" end
-		out[#out + 1] = ("%s (%s), %s; %d reads from %d NPCs in the last minute."):format(shownLabel(key), key, state, n, u)
+		else state = ("not confirmed yet (it needs %d reads from %d NPCs over %d s)"):format(RULE.reads, RULE.npcs, RULE.span) end
+		local label = shownLabel(key)
+		out[#out + 1] = ("%s, %s; %d reads from %d NPCs in the last minute."):format(
+			label == key and ("key " .. key) or ("%s (key %s)"):format(label, key), state, n, u)
 	end
 	if inGroup() then
 		checkParty("asked")
 		out[#out + 1] = #offShard == 0 and "party: everyone is on the party's shard."
 			or ("party: not on the party's shard: %s."):format(table.concat(offShard, ", "))
-		for name, p in pairs(peers) do
-			out[#out + 1] = ("%s sees %s (%s ago): %s."):format(name, p.key, age(now() - p.t),
-				current == nil and "you have none yet" or (p.key == current and "the same key as you" or "a different key"))
-		end
+	end
+	for name, p in pairs(peers) do
+		out[#out + 1] = ("%s sees %s (%s ago%s): %s."):format(name, p.key, age(now() - p.t),
+			p.how and (", by " .. p.how) or "", ns.compare(p.key))
 	end
 	local m = char and char.maps[mapID() or -1]
 	if m then
@@ -501,6 +647,7 @@ L.On("PLAYER_ENTERING_WORLD", function(_, login, reload)
 	log(("world %s%s"):format(mapName(mapID()), L.Value(login) == true and " login" or (L.Value(reload) == true and " reload" or "")))
 	reset("world")
 	checkParty("world")
+	L.After(10, joinChannel, "channel")
 end)
 L.On("ZONE_CHANGED_NEW_AREA", function()
 	lastZone = { t = now(), what = "zone" }
@@ -606,5 +753,22 @@ SlashCmdList.PORTAGE = L.Slash({
 	end,
 	hide = function() db.shown = false frame:Hide() P("the shard line is hidden (/portage show brings it back).") end,
 	show = function() db.shown = true frame:Show() show() P("the shard line is shown.") end,
-}, "/portage: which shard you are on | /portage log [n]: the last n log lines | /portage mark <text>: a note in the"
-	.. " log | /portage hide | show: the shard line by the minimap", P)
+	ping = ping,
+	channel = function(arg)
+		if arg == "off" then
+			db.channel = false
+			if ns.channelID() then pcall(LeaveChannelByName, CHANNEL) end
+			P("left the " .. CHANNEL .. " channel; /portage channel on joins it again.")
+		elseif arg == "on" then
+			db.channel = true
+			joinChannel()
+			P(ns.channelID() and ("in the " .. CHANNEL .. " channel.")
+				or "could not join the channel (the channel list may be full).")
+		else
+			P(ns.channelID() and ("in the " .. CHANNEL .. " channel (/portage channel off leaves it).")
+				or ("not in the " .. CHANNEL .. " channel (/portage channel on)."))
+		end
+	end,
+}, "/portage: which shard you are on | /portage ping [name]: test which routes reach your friends | /portage log [n]:"
+	.. " the last n log lines | /portage mark <text>: a note in the log | /portage hide | show: the shard line"
+	.. " | /portage channel on | off", P)

@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Portage
 ## Notes: Which shard of the server you are on, read from the NPCs around you; your party sees it too. /portage
-## Version: 0.1.1
+## Version: 0.2.0
 ## Author: Dominik
 ## AllowLoadGameType: camelot
 ## SavedVariables: PortageDB
