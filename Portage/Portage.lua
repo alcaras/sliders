@@ -17,7 +17,8 @@ local _, ns = ...
 local L = ns.L
 
 local LAYOUT = {
-	point = { "TOPRIGHT", "TOPRIGHT", -230, -8 },   -- left of the minimap
+	point = { "TOP", "BOTTOM", 0, -6 },             -- under the minimap (left of it, the buffs drew over the line)
+	fallback = { "TOPRIGHT", "TOPRIGHT", -40, -200 },   -- no Minimap frame: about where it would be
 	width = 120, height = 14,
 	font = 11,
 	grey = { 0.55, 0.55, 0.55 },     -- unconfirmed or stale
@@ -176,19 +177,20 @@ end
 
 -- ---------------------------------------------------------------- the line on screen
 local frame = CreateFrame("Frame", "PortageFrame", UIParent)
-frame:SetPoint(LAYOUT.point[1], UIParent, LAYOUT.point[2], LAYOUT.point[3], LAYOUT.point[4])
+local function DefaultPoint(f)
+	local p = Minimap and LAYOUT.point or LAYOUT.fallback
+	f:SetPoint(p[1], Minimap or UIParent, p[2], p[3], p[4])
+end
+DefaultPoint(frame)
 frame:SetSize(LAYOUT.width, LAYOUT.height)
 frame:SetFrameStrata("LOW")
 local text = frame:CreateFontString(nil, "OVERLAY")
 text:SetFont(STANDARD_TEXT_FONT, LAYOUT.font, "OUTLINE")
-text:SetPoint("RIGHT", frame, "RIGHT", 0, 0)
-text:SetJustifyH("RIGHT")
+text:SetPoint("CENTER", frame, "CENTER", 0, 0)
+text:SetJustifyH("CENTER")
 text:SetText("?")
 text:SetTextColor(LAYOUT.grey[1], LAYOUT.grey[2], LAYOUT.grey[3])
 
-local function DefaultPoint(f)
-	f:SetPoint(LAYOUT.point[1], UIParent, LAYOUT.point[2], LAYOUT.point[3], LAYOUT.point[4])
-end
 
 local tentative   -- the leading key while none is confirmed
 
