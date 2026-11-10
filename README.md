@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.1). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.2). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
@@ -44,6 +44,7 @@ In the panel, or `/sliders open`:
 
 - **Off**: nobody can ask you.
 - **When solo**: friends can ask while you are alone.
+  (Paused while the game has a shard move scheduled for you, so nobody lands on a shard you are about to leave.)
 - **When my party has room**: also while you lead a party of 4 or fewer. Never a raid, never in a dungeon or
   battleground, never while your party is listed in the group finder or queued together. Your party will see the
   guest join and leave a few seconds later.
