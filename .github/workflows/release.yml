@@ -1,5 +1,5 @@
-# On a version tag (v0.3.0): zip the Portage folder and attach it to a GitHub release, so players and updaters can
-# download it. The tag must match "## Version:" in Portage/Portage.toc.
+# On a version tag (v0.3.0): zip the Sliders folder and attach it to a GitHub release, so players and updaters can
+# download it. The tag must match "## Version:" in Sliders/Sliders.toc.
 name: release
 on:
   push:
@@ -13,13 +13,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check the version
         run: |
-          toc=$(grep -m1 '^## Version:' Portage/Portage.toc | awk '{print $3}')
+          toc=$(grep -m1 '^## Version:' Sliders/Sliders.toc | awk '{print $3}')
           if [ "v$toc" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME does not match Portage.toc version $toc"; exit 1
+            echo "tag $GITHUB_REF_NAME does not match Sliders.toc version $toc"; exit 1
           fi
       - name: Zip the addon
-        run: zip -r "Portage-${GITHUB_REF_NAME#v}.zip" Portage
+        run: zip -r "Sliders-${GITHUB_REF_NAME#v}.zip" Sliders
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "Portage-${GITHUB_REF_NAME#v}.zip" --title "Portage ${GITHUB_REF_NAME#v}" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" "Sliders-${GITHUB_REF_NAME#v}.zip" --title "Sliders ${GITHUB_REF_NAME#v}" --generate-notes

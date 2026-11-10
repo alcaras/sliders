@@ -1,61 +1,82 @@
-# Portage
+# Sliders
 
-A WoW Forever addon that shows which shard of the server you are on. Forever puts everyone on one big server and
-splits each zone into copies (shards). Portage works out your copy from the NPCs around you and shows it as a small
-line under the minimap, like "Barrens B". In a group it tells your party which shard you see, so you can tell
-whether you are all in the same one.
+A WoW Forever addon for shards. Forever puts everyone on one big server and splits each zone into copies (shards,
+or layers). Sliders shows which shard you are on, which shard your friends are on, and lets you **hop** to another
+shard of your zone with one click, when a friend there is open for invites.
 
-It only reads and writes down what it sees. It never invites, accepts, leaves a group or presses anything for you.
+It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
+(or you switched on "open for invites").
 
-This is a test version (0.2.0). The goal is to find out how well shard detection works, and which ways of
-messaging reach a friend on another shard, before building shard hopping on top of it.
+This is a test version (0.3.0). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
-- **The shard line**, under the minimap: the zone and a letter, like "Barrens A". Grey until Portage is sure
-  (3 reads from at least 2 NPCs over at least 5 seconds), white once it is, grey again when it hasn't seen an NPC for
-  2 minutes. Before that it shows the raw key in grey. `?` means nothing yet, a loading screen, a dungeon or a flight
-  (shards aren't read there). Drag it to move it.
-- **How it knows:** every NPC's ID (its GUID, like `Creature-0-6821-1-948-3000-...`) names the server and zone copy
-  that spawned it: `6821-1-948` is the key. NPCs near you were spawned by your shard, so their key is yours.
-- **The names are Portage's, not WoW's,** and they are yours: "Barrens A" is the first Barrens shard *you* saw. Your
-  friend's "Barrens A" can be a different shard; compare the raw key in `/portage` instead.
-- **Hover the line** (or type `/portage`) for the details: the raw key, how many NPC reads back it up, who in your
-  party is on another shard, and which key each party member with Portage sees.
-- **Chat lines** only when something happens: "a shard move is coming in 30 s", or "your shard changed while you
-  stayed in the zone".
+- **The shard line**: a small line like "Desolace 7074". The number is the shard (the game's server for it), so
+  everyone on the same shard sees the same name. Grey until Sliders is sure (3 reads from at least 2 NPCs over at
+  least 5 seconds), white once it is. `?` means nothing read yet, a loading screen, a dungeon or a flight.
+  - The first time, the line sits near the top of the screen in a blue box: **drag it** where you want it, then
+    **right-click** it to lock it there. Right-click again to unlock.
+- **How it knows:** every NPC's ID (its GUID, like `Creature-0-7074-1-9-3000-...`) names the server that spawned it:
+  `7074` is the shard, `1` the continent. The number after that differs from player to player even on one shard,
+  so Sliders ignores it.
+- **The Shards panel** (left-click the line, the minimap button, or `/sliders shards`): every shard known in your zone,
+  who of your friends is on it, who is open for invites, how many players you saw there. **Hop** sits on every shard
+  where someone is open.
 
-## How to help test
+## Hopping
 
-1. Install it, log in (a full relog, not just `/reload`, the first time), and play as usual. Target or mouse over a
-   few NPCs.
-2. Group up with someone else who runs Portage. Type `/portage`: the lines "<name> sees ..." say whether you see the
-   same key.
-3. **The ping test**, with a friend who is *not* in your group and on a different key: type `/portage ping`. It sends
-   one test message every way there is: guild, the `PortageTest` channel, a whisper to each online friend, and
-   Battle.net to each Battle.net friend playing Forever. `/portage ping Name` also whispers that character. Each
-   friend with Portage gets a chat line like "Alcara pinged you by Battle.net: 6821-1-948, a different key from
-   yours" and answers automatically, so you see "Bob answered by guild: ...". Which ways arrive across shards is what
-   we want to learn. Try it once on the same shard and once on different ones.
-4. At moments worth noting, type `/portage mark <text>`, e.g. `/portage mark crossed into Stonetalon` or
-   `/portage mark accepted the invite`. It goes into the log with the time.
-5. Afterwards, send the file `World of Warcraft\_forever_\WTF\Account\<your account>\SavedVariables\Portage.lua`.
-   It holds the shard log: keys, zones, times, group size, the character names of party members and of friends whose
-   pings you got or sent. No chat, nothing else.
+1. Open the panel, click **Hop** on a shard.
+2. Sliders asks a friend who is open on that shard to invite you. Their Sliders either invites you at once, or shows
+   them a small "Alcara asks to hop to your shard [Invite] [No]".
+3. You accept the invite (Sliders does it for you when the game allows; otherwise click Accept).
+4. The server moves you within a second or two. Sliders leaves the group for you 3 seconds later, and you stay on
+   the new shard.
+
+You must be out of a group, out of combat, and in the open world to hop.
+
+## Open for invites (off by default)
+
+In the panel, or `/sliders open`:
+
+- **Off**: nobody can ask you.
+- **When solo**: friends can ask while you are alone.
+- **When my party has room**: also while you lead a party of 4 or fewer. Never a raid, never in a dungeon or
+  battleground, never while your party is listed in the group finder or queued together. Your party will see the
+  guest join and leave a few seconds later.
+
+And **when someone asks**: **Ask me** (a popup each time) or **Invite friends at once**.
+"Friends" are your Battle.net friends, character friends and guild members who run Sliders.
 
 ## Commands
 
-- `/portage`: which shard you are on, the party, and which key each friend reported.
-- `/portage ping [name]`: the ping test (once per 10 seconds).
-- `/portage log [n]`: the last n lines of the log (15 by default).
-- `/portage mark <text>`: a note in the log.
-- `/portage hide` / `/portage show`: the shard line by the minimap.
-- `/portage channel off` / `on`: Portage joins a hidden chat channel, `PortageTest`, for the ping test. Anyone who
-  joins that channel can see who is in it; `off` leaves it.
+- `/sliders`: your shard, and the shards your friends reported.
+- `/sliders shards`: the panel. `/sliders hop 7074`: hop to that shard of your zone.
+- `/sliders open off | solo | group`, `/sliders invite ask | auto`.
+- `/sliders lock` / `unlock`, `/sliders hide` / `show`: the shard line. `/sliders minimap`: the minimap button.
+- `/sliders chat on | off`: the automatic chat lines ("your shard changed", "a shard move is coming"), off by default.
+- `/sliders channel on | off`: a public chat channel (`SlidersTest`) where everyone running Sliders can see each other,
+  strangers too. Off by default; anyone in that channel can see who is in it. `/sliders strangers on` also lets
+  strangers there ask you for a hop (when you are open).
+- `/sliders ping [name]`: a test of which routes reach your friends; `/sliders log [n]`, `/sliders mark <text>`.
+
+## How to help test
+
+- Hop a few times, and host a few hops. Try: inviting from another zone, relogging, crossing a zone line together.
+- At moments worth noting, `/sliders mark <what happened>`.
+- Afterwards, send the file `World of Warcraft\_forever_\WTF\Account\<your account>\SavedVariables\Sliders.lua`.
+  It holds the shard log: shards, zones, times, group size, hop steps with their timings, and the character names
+  of friends whose shard you saw. No chat, nothing else.
+
+## Messages
+
+Sliders talks only to friends and guild members who run it (and the public channel, if you switch it on), with small
+addon messages you never see: a hello at login, your shard when it changes (at most once per 30 seconds), and the
+hop request and answers. Nothing in combat, nothing on a timer.
 
 ## Install
 
-Unzip `Portage-<version>.zip` into `World of Warcraft\_forever_\Interface\AddOns`, so the folder `Portage` holds
-`Portage.toc`. Then log in.
+Unzip `Sliders-<version>.zip` into `World of Warcraft\_forever_\Interface\AddOns`, so the folder `Sliders` holds
+`Sliders.toc`. Then log in (a full relog, not just `/reload`, the first time).
 
+Sliders embeds LibStub, CallbackHandler, LibDataBroker and LibDBIcon for its minimap button.
 World of Warcraft is Blizzard Entertainment's. A fan project, not affiliated with Blizzard.
