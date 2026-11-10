@@ -1,8 +1,8 @@
--- Lib.lua: the few helpers Portage needs, so it runs on its own. They mirror the author's shared library (AlcCore,
--- 2026-11-09), cut down to what Portage calls:
+-- Lib.lua: the few helpers Sliders needs, so it runs on its own. They mirror the author's shared library (AlcCore,
+-- 2026-11-09), cut down to what Sliders calls:
 --   secret values (Value, Num, Kind, Read): in combat and in some places the client hands addons "secret" values
 --     that Lua may not compare or do arithmetic on; these return nil (or "secret") for them
---   error isolation (Safe): every way into Portage's code runs under xpcall; the first error goes to the game's error
+--   error isolation (Safe): every way into Sliders's code runs under xpcall; the first error goes to the game's error
 --     handler (BugSack shows it), repeats are counted, and after 20 that part switches itself off until /reload
 --   timers, scripts, guarded event registration on one shared event frame (unit events on their own frames)
 --   combat state from the regen events, OnLoad (saved variables are ready)
@@ -136,7 +136,7 @@ function L.InCombat() return inCombat end
 local combatSubs = {}
 function L.OnCombatChanged(fn, label) combatSubs[#combatSubs + 1] = L.Safe(label or "combat", fn) end
 
--- registered here, before Portage.lua's own handlers: the state is right when theirs run
+-- registered here, before Sliders.lua's own handlers: the state is right when theirs run
 L.On("PLAYER_REGEN_DISABLED", function()
 	inCombat = true
 	for _, f in ipairs(combatSubs) do f(true) end
