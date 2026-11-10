@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.2). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.3). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
@@ -29,8 +29,12 @@ This is a test version (0.3.2). It was called Portage before; remove the old `Po
 2. Sliders asks a friend who is open on that shard to invite you. Their Sliders either invites you at once, or shows
    them a small "Alcara asks to hop to your shard [Invite] [No]".
 3. You accept the invite (Sliders does it for you when the game allows; otherwise click Accept).
-4. The server moves you within a second or two. Sliders leaves the group for you 3 seconds later, and you stay on
-   the new shard.
+4. The server moves you within a second or two, and you **stay in the host's group** while you play there.
+
+What we have seen so far: in a group you are never moved off the party's shard; whoever invites is never moved;
+leaving a group *may* move you (once it moved alcaras to another shard). So Sliders keeps you in the group after a
+hop. Once leaving proves safe, the panel's "After your hop: Leave the group" (`/sliders after leave`) makes Sliders
+leave for you 3 seconds after the move.
 
 The hop's own messages are silent (addon messages nobody sees). The game's own group lines for the hop ("Bnpal
 joins the party", "You leave the group", "Your group has been disbanded") are hidden for the hop's few seconds, for
