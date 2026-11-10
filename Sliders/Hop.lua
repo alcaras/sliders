@@ -131,7 +131,18 @@ local function statusFields(kind)
 	return ("%d;%s;%d;%d"):format(A.mapID() or 0, A.current() or "-", isOpen(kind) and 1 or 0, ns.crowd())
 end
 -- ST2;<map>;<shard>;<open>;<crowd>;<ask>;<version> (0.3.0-0.3.3 read the first five fields and ignore the version)
-local function st2(kind, ask) return ("ST2;%s;%d;%s"):format(statusFields(kind), ask and 1 or 0, VERSION) end
+-- our class file ("ROGUE"): friends colour our name by it (alcaras: "color code people by class")
+local function myClass()
+	local _, file = UnitClass("player")
+	file = L.Value(file)
+	return type(file) == "string" and file or ""
+end
+-- ST2;<map>;<shard>;<open>;<crowd>;<ask>;<version>;<class> (older versions read what they know and ignore the rest)
+local function st2(kind, ask)
+	return ("ST2;%s;%d;%s;%s"):format(statusFields(kind), ask and 1 or 0, VERSION, myClass())
+end
+-- HI2;<version>;<map>;<shard>;<open>;<crowd>;<class>
+local function hi2(kind) return ("HI2;%s;%s;%s"):format(VERSION, statusFields(kind), myClass()) end
 
 -- ---------------------------------------------------------------- sending
 local function blocked() return L.InCombat() or A.lockdown() end
@@ -215,7 +226,7 @@ end
 -- ---------------------------------------------------------------- contacts
 -- from a message: who sent it, by which route; the best route to them is kept (Battle.net > whisper > guild > channel)
 local function contactFrom(channel, sender, bnID)
-	local full, route, target
+	local full, route, target, bnClass
 	if bnID then
 		local info = C_BattleNet and L.Read(C_BattleNet.GetGameAccountInfoByID, bnID)
 		local name = type(info) == "table" and L.Value(info.characterName)
@@ -223,6 +234,8 @@ local function contactFrom(channel, sender, bnID)
 		local r = type(info) == "table" and L.Value(info.realmName)
 		full = name .. "-" .. (type(r) == "string" and r ~= "" and r or realm())
 		route, target = "BN", bnID
+		local cls = type(info) == "table" and L.Value(info.classFilename)
+		bnClass = type(cls) == "string" and cls ~= "" and cls or nil
 	else
 		if type(sender) ~= "string" then return nil end
 		full = sender
@@ -241,6 +254,7 @@ local function contactFrom(channel, sender, bnID)
 		c.route, c.target = route, target
 	end
 	if route == "GUILD" then c.guild = true end
+	if bnClass then c.class = bnClass end
 	-- Battle.net friends, guild members and character friends are friends (shown by name, auto-invited); a whisper from
 	-- anyone else is a stranger, like the channel
 	if route == "BN" or route == "GUILD" or (route == "WHISPER" and friendKeys()[key]) then c.friend = true end
@@ -255,7 +269,8 @@ local function remember(c)
 	if not db or not c.st then return end
 	db.contacts = db.contacts or {}
 	db.contacts[c.key] = { name = c.name, full = c.full, route = c.route, friend = c.friend, guild = c.guild,
-		version = c.version, map = c.st.map, shard = c.st.shard, open = c.st.open, crowd = c.st.crowd, at = A.stamp() }
+		version = c.version, class = c.class, map = c.st.map, shard = c.st.shard, open = c.st.open, crowd = c.st.crowd,
+		at = A.stamp() }
 end
 
 -- back from SlidersDB.contacts: Battle.net friends by their character name in today's friends list (game account ids
@@ -274,15 +289,16 @@ function ns.restoreContacts()
 			if r.route == "BN" then target = ids[(r.name or ""):lower()] end
 			if r.route ~= "BN" or target then
 				contacts[key] = { key = key, name = r.name, full = r.full, route = r.route, target = target, friend = r.friend,
-					guild = r.guild, version = r.version, restored = true,
+					guild = r.guild, version = r.version, class = r.class, restored = true,
 					st = { map = r.map, shard = r.shard, open = r.open, crowd = r.crowd, t = now() - (t - (r.at or t)) } }
 			end
 		end
 	end
 end
 
-local function setStatus(c, route, map, shard, open, crowd, version)
+local function setStatus(c, route, map, shard, open, crowd, version, class)
 	if type(version) == "string" and version:match("^%d+%.%d+") then c.version = version end
+	if type(class) == "string" and class:match("^%u+$") then c.class = class end
 	local s = A.shardOf(shard)
 	local old = c.st
 	c.st = { map = tonumber(map), shard = s, open = open == "1", crowd = tonumber(crowd), t = now() }
@@ -431,6 +447,13 @@ local function people(friendsOnly)
 	return byName
 end
 
+-- a name in its class colour (RAID_CLASS_COLORS), white when the class is not known
+function ns.classColored(name, class)
+	local c = class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
+	local hex = c and (c.colorStr or (c.r and ("ff%02x%02x%02x"):format(c.r * 255, c.g * 255, c.b * 255)))
+	return hex and ("|c%s%s|r"):format(hex, name) or name
+end
+
 -- the hello's answers are still on their way (the first 30 s after loading)
 function ns.asking() return helloAt ~= nil and now() < helloAt + 15 end
 
@@ -440,7 +463,7 @@ function ns.friendRows()
 	local rows = {}
 	for _, c in pairs(people(true)) do
 		local st = c.st
-		rows[#rows + 1] = { name = c.name, where = st.shard and A.label(st.shard, st.map) or "no shard yet",
+		rows[#rows + 1] = { name = c.name, class = c.class, where = st.shard and A.label(st.shard, st.map) or "no shard yet",
 			same = st.shard ~= nil and st.shard == cur and st.map == map, here = st.map == map, open = st.open,
 			old = c.version == nil or newer(VERSION, c.version) }
 	end
@@ -684,10 +707,10 @@ ns.hooks.message = function(body, channel, sender, bnID)
 	if not c then return end
 	c.seen = now()
 	if v == "HI2" then
-		setStatus(c, route, f[3], f[4], f[5], f[6], f[2])
+		setStatus(c, route, f[3], f[4], f[5], f[6], f[2], f[7])
 		answer(c, route, f[3])
 	elseif v == "ST2" then
-		setStatus(c, route, f[2], f[3], f[4], f[5], f[7])
+		setStatus(c, route, f[2], f[3], f[4], f[5], f[7], f[8])
 		local mine = answering[route]
 		if mine and tonumber(f[2]) == A.mapID() and A.shardOf(f[3]) == mine.shard and (f[4] == "1" or not mine.open) then
 			mine.cancelled = true   -- someone already answered for our shard
@@ -736,7 +759,7 @@ local function hello()
 	if helloSent or not char then return end
 	if blocked() then L.After(30, hello, "hello") return end
 	helloSent = true
-	local msg = ("HI2;%s;%s"):format(VERSION, statusFields("direct"))
+	local msg = hi2("direct")
 	local bn, wh = 0, 0
 	for _, f in ipairs(A.bnFriends()) do
 		if bn < SPAM.hello then bn = bn + 1 ns.sendRoute("BN", msg, f.id) end
@@ -745,9 +768,9 @@ local function hello()
 		if wh < SPAM.hello then wh = wh + 1 ns.sendRoute("WHISPER", msg, name) end
 	end
 	local guild = L.Read(IsInGuild) == true
-	if guild then ns.sendRoute("GUILD", ("HI2;%s;%s"):format(VERSION, statusFields("GUILD"))) end
+	if guild then ns.sendRoute("GUILD", hi2("GUILD")) end
 	local ch = ns.channelID()
-	if ch then ns.sendRoute("CHANNEL", ("HI2;%s;%s"):format(VERSION, statusFields("CHANNEL")), tostring(ch)) end
+	if ch then ns.sendRoute("CHANNEL", hi2("CHANNEL"), tostring(ch)) end
 	log(("hello sent: %d Battle.net, %d whispers%s%s"):format(bn, wh, guild and ", guild" or "", ch and ", channel" or ""))
 end
 
@@ -1089,7 +1112,7 @@ function ns.RefreshPanel()
 			y = y - ROWH - 4
 			local who, strangers = {}, 0
 			for _, c in ipairs(e.people) do
-				if c.friend then who[#who + 1] = c.name .. (c.st.open and " (open)" or "")
+				if c.friend then who[#who + 1] = ns.classColored(c.name, c.class) .. (c.st.open and " (open)" or "")
 					.. ((c.version and c.version ~= VERSION) and (" (" .. c.version .. ")") or "")
 				else strangers = strangers + 1 end
 			end
