@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.6). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.7). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
@@ -32,9 +32,8 @@ This is a test version (0.3.6). It was called Portage before; remove the old `Po
 4. The server moves you within a second or two, and you **stay in the host's group** while you play there.
 
 What we have seen so far: in a group you are never moved off the party's shard; whoever invites is never moved;
-leaving a group *may* move you (once it moved alcaras to another shard). So Sliders keeps you in the group after a
-hop. Once leaving proves safe, the panel's "After your hop: Leave the group" (`/sliders after leave`) makes Sliders
-leave for you 3 seconds after the move.
+leaving a group whose invite moved you **moves you again**, to a shard the game picks. So you stay in the host's group
+while you play on that shard. Leave it yourself (Blizzard's menu) when you are done, knowing it may move you.
 
 The hop's own messages are silent (addon messages nobody sees). The game's own group lines for the hop ("Bnpal
 joins the party", "You leave the group", "Your group has been disbanded") are hidden for the hop's few seconds, for
@@ -53,19 +52,19 @@ In the panel, or `/sliders open`:
   battleground, never while your party is listed in the group finder or queued together. Your party will see the
   guest join and leave a few seconds later.
 
-And **when someone asks**: **Ask me** (a popup each time) or **Invite friends at once**.
-"Friends" are your Battle.net friends, character friends and guild members who run Sliders.
+And **when someone asks**: **Ask everyone** (a popup each time), **Invite friends, ask others**, or **Invite
+anyone**. "Friends" are your Battle.net friends, character friends and guild members who run Sliders; others can only
+reach you through the public channel (off by default) or a whisper.
 
 ## Commands
 
 - `/sliders`: your shard, and every friend running Sliders: their version and shard. `/sliders version`: yours.
 - `/sliders shards`: the panel. `/sliders hop 7074`: hop to that shard of your zone.
-- `/sliders open off | solo | group`, `/sliders invite ask | auto`.
+- `/sliders open off | solo | group`, `/sliders invite ask | friends | anyone`.
 - `/sliders lock` / `unlock`, `/sliders hide` / `show`: the shard line. `/sliders minimap`: the minimap button.
 - `/sliders chat on | off`: the automatic chat lines ("your shard changed", "a shard move is coming"), off by default.
 - `/sliders channel on | off`: a public chat channel (`SlidersTest`) where everyone running Sliders can see each other,
-  strangers too. Off by default; anyone in that channel can see who is in it. `/sliders strangers on` also lets
-  strangers there ask you for a hop (when you are open).
+  strangers too. Off by default; anyone in that channel can see who is in it.
 - `/sliders ping [name]`: a test of which routes reach your friends; `/sliders log [n]`, `/sliders mark <text>`.
 
 ## How to help test

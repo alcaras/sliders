@@ -4,7 +4,9 @@
 -- Level 1 (alcaras): every automatic step answers the user's own click on Hop, or a hop request to a host who opted in.
 -- Defaults (alcaras): not open for invites, silent. Open modes: "solo" (only while alone) or "group" (also while
 -- leading a party with room: never a raid, never in an instance or battleground, never while the party is listed or
--- queued, never off the party's shard). How: "ask" (a popup per request) or "auto" (friends invited at once).
+-- queued, never off the party's shard). When someone asks: "ask" (a popup each time), "friends" (friends invited at
+-- once, others asked), "anyone" (everyone invited at once). After a hop the guest stays in the host's group: leaving
+-- undoes the move (alcaras 2026-11-09: "remove the leave the group option since it might just hop you back").
 -- No spam (SPAM below): status only on a change, one message per route per 30 s (the public channel 60 s), hellos once
 -- per session, nothing in combat or chat lockdown, a throttled send is dropped.
 -- Messages (prefix Sliders, ";"-separated, version first):
@@ -24,7 +26,7 @@ local SPAM = {
 	answerDelay = 5,     -- answers to an ask wait 0-5 s; skipped when someone already answered for that shard
 	fanout = 20,         -- direct status messages (Battle.net, whisper) per change
 	hello = 50,          -- hellos per route kind per session
-	reply = 60,          -- s between direct answers to one contact
+	reply = 10,          -- s between direct answers to one contact (a reload's hello must get its answer)
 	hopEvery = 10,       -- s between Hop clicks
 	perRequester = 120,  -- a host considers one request per requester per 2 min
 	autoInvites = 5, autoWindow = 600,   -- an auto-inviting host: at most 5 invites per 10 min
@@ -59,6 +61,7 @@ local asked = {}              -- host side: requester key -> now()
 local autoLog = {}            -- host side: now() of each automatic invite
 local hosting                 -- host side: { req, guest, t } while a guest is invited
 local helloSent = false
+local helloAt                 -- when the hello goes out: the tooltip says "asking" until its answers can be in
 local openFlag                -- the open flag last advertised
 local advertised = {}         -- the shard and map last advertised
 local movePending             -- Blizzard scheduled a shard move for us (SHARD_TRANSFER_IMMINENT): not a host until it
@@ -111,7 +114,6 @@ end
 -- why this character is not open right now, or nil
 local function closedWhy(kind)
 	if not char or char.open == "off" then return "closed" end
-	if kind == "CHANNEL" and not char.strangers then return "closed" end
 	if A.instanced() or A.paused() then return "busy" end
 	if L.Read(UnitIsAFK, "player") == true then return "busy" end
 	if movePending then return "busy" end
@@ -245,11 +247,47 @@ local function contactFrom(channel, sender, bnID)
 	return c, route
 end
 
+-- friends remembered across a reload (SlidersDB.contacts, a day): a status holds until the next one, and a reload
+-- would otherwise show nobody until the hello's answers come in (alcaras: "i reloaded and i don't see them")
+local KEEP_CONTACTS = 86400
+local function remember(c)
+	local db = ns.db
+	if not db or not c.st then return end
+	db.contacts = db.contacts or {}
+	db.contacts[c.key] = { name = c.name, full = c.full, route = c.route, friend = c.friend, guild = c.guild,
+		version = c.version, map = c.st.map, shard = c.st.shard, open = c.st.open, crowd = c.st.crowd, at = A.stamp() }
+end
+
+-- back from SlidersDB.contacts: Battle.net friends by their character name in today's friends list (game account ids
+-- change between sessions), the others as they were; whether they show still depends on being online
+function ns.restoreContacts()
+	local db = ns.db
+	if not db or type(db.contacts) ~= "table" then return end
+	local ids = {}
+	for _, f in ipairs(A.bnFriends()) do ids[f.name:lower()] = f.id end
+	local t = A.stamp()
+	for key, r in pairs(db.contacts) do
+		if type(r) ~= "table" or t - (r.at or 0) > KEEP_CONTACTS then
+			db.contacts[key] = nil
+		elseif not contacts[key] then
+			local target = r.route == "WHISPER" and r.full or nil
+			if r.route == "BN" then target = ids[(r.name or ""):lower()] end
+			if r.route ~= "BN" or target then
+				contacts[key] = { key = key, name = r.name, full = r.full, route = r.route, target = target, friend = r.friend,
+					guild = r.guild, version = r.version, restored = true,
+					st = { map = r.map, shard = r.shard, open = r.open, crowd = r.crowd, t = now() - (t - (r.at or t)) } }
+			end
+		end
+	end
+end
+
 local function setStatus(c, route, map, shard, open, crowd, version)
 	if type(version) == "string" and version:match("^%d+%.%d+") then c.version = version end
 	local s = A.shardOf(shard)
 	local old = c.st
 	c.st = { map = tonumber(map), shard = s, open = open == "1", crowd = tonumber(crowd), t = now() }
+	c.restored = nil
+	remember(c)
 	if not old or old.shard ~= s or old.map ~= c.st.map or old.open ~= c.st.open then
 		log(("status %s by %s: %s map %s%s"):format(c.name, ROUTE_NAME[route] or route, s or "-", tostring(map),
 			c.st.open and " open" or ""))
@@ -259,7 +297,10 @@ end
 
 -- answer a hello or an ask: directly to a contact, or once on a broadcast route unless someone answered for us
 local function answer(c, route, map)
-	if not A.current() then return end
+	if not A.current() then
+		if route == "BN" or route == "WHISPER" then c.owesReply = true end   -- answered once our shard is known
+		return
+	end
 	if route == "BN" or route == "WHISPER" then
 		if now() - (c.replied or -1e9) < SPAM.reply or blocked() then return end
 		c.replied = now()
@@ -389,6 +430,9 @@ local function people(friendsOnly)
 	end
 	return byName
 end
+
+-- the hello's answers are still on their way (the first 30 s after loading)
+function ns.asking() return helloAt ~= nil and now() < helloAt + 15 end
 
 -- the tooltip's friends: your shard first, then your zone, then the rest; each with where they are
 function ns.friendRows()
@@ -562,26 +606,11 @@ end
 
 -- the move comes about 1 s after joining, without a countdown (alcaras' log, 2026-11-09 17:04): leave 3 s after it;
 -- the new shard's name follows once Sliders has read a few NPCs there
-local LEAVE_AFTER = 3
 ns.hooks.transfer = function(moved)
 	if refreshButton then refreshButton:Hide() end
 	if movePending then movePending = nil refreshOpen() end
 	if not (moved and hop and (hop.phase == "joined" or hop.phase == "accepting")) then return end
-	local h = hop
-	h.transfer, h.tMove = true, now()
-	if char.afterHop ~= "leave" then return end   -- "stay": the guest stays in the host's group (the key ends the hop)
-	L.After(LEAVE_AFTER, function()
-		if hop ~= h or h.phase == "moved" then return end
-		h.phase = "moved"
-		if A.inGroup() then pcall(C_PartyInfo.LeaveParty) end
-		log(("hop_left %s %s"):format(h.req, h.host.name))
-		if ns.RefreshPanel then ns.RefreshPanel() end
-		L.After(60, function()
-			if hop == h and h.phase == "moved" then
-				endHop(("moved and left %s's group; Sliders has not read the new shard yet."):format(h.host.name), true)
-			end
-		end, "hop")
-	end, "hop")
+	hop.transfer, hop.tMove = true, now()   -- the guest stays in the host's group; the new shard's key ends the hop
 end
 
 ns.hooks.left = function()
@@ -625,7 +654,7 @@ end
 local function onHopRequest(c, req, map, shard, guestFull)
 	if now() - (asked[c.key] or -1e9) < SPAM.perRequester then return end   -- one request per requester per 2 min
 	asked[c.key] = now()
-	local why = closedWhy(c.friend and "direct" or "CHANNEL")
+	local why = closedWhy("direct")
 	if not why and L.InCombat() then why = "combat" end
 	if not why and (tonumber(map) ~= A.mapID() or A.shardOf(shard) ~= A.current()) then why = "moved" end
 	log(("host_request %s from %s by %s: %s"):format(req, c.name, ROUTE_NAME[c.route], why or "ok"))
@@ -633,7 +662,8 @@ local function onHopRequest(c, req, map, shard, guestFull)
 	local t = now()
 	local n = 0
 	for i = #autoLog, 1, -1 do if t - autoLog[i] < SPAM.autoWindow then n = n + 1 else table.remove(autoLog, i) end end
-	if char.invite == "auto" and c.friend and n < SPAM.autoInvites then
+	local auto = char.invite == "anyone" or (char.invite == "friends" and c.friend)
+	if auto and n < SPAM.autoInvites then
 		autoLog[#autoLog + 1] = t
 		invite(c, req, guestFull)
 		say(("invited %s for a hop to your shard."):format(c.name))
@@ -676,10 +706,14 @@ ns.hooks.key = function(key)
 		hop.tMove = hop.tMove or now()
 		local cr = hop.host.name
 		sendTo(hop.host, ("DONE2;%s;%s;%s"):format(hop.host.key, hop.req, key))
-		local stay = char.afterHop ~= "leave" and A.inGroup()
+		local stay = A.inGroup()
 		local where = key == hop.shard and ("moved to %s via %s."):format(A.label(key), cr)
 			or ("moved to %s (not %s's shard)."):format(A.label(key), cr)
 		endHop(stay and (where .. (" You stay in %s's group: leaving may move you back."):format(cr)) or where, true, stay)
+	end
+	-- friends whose hello came before our shard was known get their answer now
+	for _, c in pairs(contacts) do
+		if c.owesReply then c.owesReply = nil c.replied = now() sendTo(c, st2("direct")) end
 	end
 	-- a re-confirm of the same shard (after a join, a transfer, a reload) is no news
 	local map = A.mapID()
@@ -717,7 +751,10 @@ local function hello()
 	log(("hello sent: %d Battle.net, %d whispers%s%s"):format(bn, wh, guild and ", guild" or "", ch and ", channel" or ""))
 end
 
+local restored = false
 ns.hooks.world = function()
+	if not restored then restored = true ns.restoreContacts() end
+	helloAt = now() + 15
 	L.After(15, hello, "hello")
 	refreshOpen()
 end
@@ -731,11 +768,9 @@ L.On("UPDATE_BATTLEFIELD_STATUS", function() refreshOpen() end, "bg")
 ns.hooks.load = function()
 	char = ns.char
 	if char.open ~= "solo" and char.open ~= "group" then char.open = "off" end   -- default: not open
-	if char.invite ~= "auto" then char.invite = "ask" end
-	-- after the move: stay in the host's group (default; alcaras 2026-11-09: leaving once moved him to another shard)
-	-- or leave 3 s after it
-	if char.afterHop ~= "leave" then char.afterHop = "stay" end
-	char.strangers = char.strangers == true
+	if char.invite == "auto" then char.invite = "friends" end   -- 0.3.0-0.3.6's "Invite friends at once"
+	if char.invite ~= "friends" and char.invite ~= "anyone" then char.invite = "ask" end
+	char.afterHop, char.strangers = nil, nil   -- settings of 0.3.0-0.3.6 that are gone
 end
 
 -- ---------------------------------------------------------------- UI (AlcPrices' look, its UI.lua S table: flat panel,
@@ -970,18 +1005,11 @@ local openSeg = segmented({ { "off", "Off", 70 }, { "solo", "When solo", 96 }, {
 	end)
 local inviteLabel = text(panel, 10.5, C.gold, true)
 inviteLabel:SetText("WHEN SOMEONE ASKS TO HOP")
-local inviteSeg = segmented({ { "ask", "Ask me", 96 }, { "auto", "Invite friends at once", 170 } }, function(mode)
+local inviteSeg = segmented({ { "ask", "Ask everyone", 104 }, { "friends", "Invite friends, ask others", 170 },
+	{ "anyone", "Invite anyone", 110 } }, function(mode)
 	if not char then return end
 	char.invite = mode
 	log("invite " .. mode)
-	ns.RefreshPanel()
-end)
-local afterLabel = text(panel, 10.5, C.gold, true)
-afterLabel:SetText("AFTER YOUR HOP")
-local afterSeg = segmented({ { "stay", "Stay in the group", 140 }, { "leave", "Leave the group", 130 } }, function(mode)
-	if not char then return end
-	char.afterHop = mode
-	log("after " .. mode)
 	ns.RefreshPanel()
 end)
 local hint = text(panel, 10, C.muted)
@@ -1095,11 +1123,7 @@ function ns.RefreshPanel()
 	y = y - 16 - 28 - 12
 	place(inviteLabel, y)
 	place(inviteSeg, y - 16)
-	y = y - 16 - 28 - 12
-	place(afterLabel, y)
-	place(afterSeg, y - 16)
 	y = y - 16 - 28 - 14
-	afterSeg:Select(char and char.afterHop or "stay")
 	local mode = char and char.open or "off"
 	openSeg:Select(mode)
 	inviteSeg:Select(char and char.invite or "ask")
@@ -1192,29 +1216,16 @@ ns.commands.open = function(arg)
 	P(char.open == "off" and "not open for hop invites." or (char.open == "solo" and "open for hop invites while solo."
 		or "open for hop invites while solo or leading a party with room (never a raid, an instance or a battleground)."))
 end
+local INVITE_SAY = { ask = "each hop request asks you first.", friends = "friends are invited at once; others are asked.",
+	anyone = "everyone who asks is invited at once." }
 ns.commands.invite = function(arg)
 	if not char then return end
-	if arg == "ask" or arg == "auto" then char.invite = arg
-	else P("/sliders invite ask | auto: ask = a popup per request; auto = friends are invited at once.") return end
+	if arg == "auto" then arg = "friends" end
+	if INVITE_SAY[arg] then char.invite = arg
+	else P("/sliders invite ask | friends | anyone: ask everyone; invite friends and ask others; invite anyone.") return end
 	log("invite " .. char.invite)
 	if ns.RefreshPanel then ns.RefreshPanel() end
-	P(char.invite == "ask" and "each hop request asks you first." or "friends' hop requests are invited at once.")
-end
-ns.commands.after = function(arg)
-	if not char then return end
-	if arg == "stay" or arg == "leave" then char.afterHop = arg
-	else P("/sliders after stay | leave: after your hop, stay in the host's group (leaving may move you back) or leave.") return end
-	log("after " .. char.afterHop)
-	if ns.RefreshPanel then ns.RefreshPanel() end
-	P(char.afterHop == "stay" and "after a hop you stay in the host's group." or "after a hop Sliders leaves the group 3 s after the move.")
-end
-ns.commands.strangers = function(arg)
-	if not char then return end
-	if arg == "on" or arg == "off" then char.strangers = arg == "on" end
-	log("strangers " .. tostring(char.strangers))
-	refreshOpen()
-	P(char.strangers and "open also to Sliders users who are not your friends (needs /sliders channel on)."
-		or "open to friends and guild only.")
+	P(INVITE_SAY[char.invite])
 end
 ns.commands.minimap = function()
 	if not (dbi and ns.db) then P("no minimap button: LibDBIcon did not load.") return end
