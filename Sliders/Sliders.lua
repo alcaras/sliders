@@ -16,8 +16,10 @@
 --   Shard moves: SHARD_TRANSFER_IMMINENT (+ GetEvictionTimeRemaining), SHARD_TRANSFER_CANCELLED, SHARD_TRANSFER.
 --   Party exchange, to learn whether two clients see the same key: "S1;<uiMapID>;<key>;<ageSec>" over PARTY only.
 --   Ping test (0.2): /sliders ping sends P1 over guild, the SlidersTest channel, whispers and Battle.net; R1 answers.
-local _, ns = ...
+local ADDON, ns = ...
 local L = ns.L
+-- the version from the TOC (one place): shown in the tooltip, the panel, /sliders version, and sent to friends
+ns.VERSION = (C_AddOns and L.Value(L.Read(C_AddOns.GetAddOnMetadata, ADDON, "Version"))) or "?"
 
 local LAYOUT = {
 	-- first run: unlocked near the top centre, in a box with a hint, so it is found; drag it, right-click locks it
@@ -736,12 +738,13 @@ local function statusLines()
 		end
 		if #parts > 0 then out[#out + 1] = "reads here: " .. table.concat(parts, "; ") .. "." end
 	end
+	if ns.contactLines then for _, line in ipairs(ns.contactLines()) do out[#out + 1] = line end end
 	return out
 end
 
 L.Script(frame, "OnEnter", function(self)
 	GameTooltip:SetOwner(self, "ANCHOR_BOTTOMLEFT")
-	GameTooltip:AddLine("Sliders")
+	GameTooltip:AddLine("Sliders " .. ns.VERSION)
 	for _, line in ipairs(statusLines()) do GameTooltip:AddLine(line, 1, 1, 1, true) end
 	GameTooltip:AddLine(db and db.locked and "Click: the shards here. Right-click: unlock to move it."
 		or "Drag: move it. Right-click: lock it here. Click: the shards here.", 0.6, 0.6, 0.6, true)
@@ -807,7 +810,9 @@ end)
 L.On("GROUP_JOINED", function()
 	lastGroup = { t = now(), what = "joined" }
 	log("joined")
-	if not (ns.isHosting and ns.isHosting()) then reset("joined") end   -- a host does not move: keep its shard
+	-- no reset: the inviter never moves, and whoever is moved gets SHARD_TRANSFER (reset there); a move without it
+	-- would still show as an in-zone change (alcaras 2026-11-09: "if you invite, it thinks it doesn't know what shard
+	-- you're in")
 	checkParty("joined")
 	hook("joined")
 end)
@@ -914,6 +919,7 @@ commands = {
 				or ("not in the " .. CHANNEL .. " channel (/sliders channel on)."))
 		end
 	end,
+	version = function() P("Sliders " .. ns.VERSION .. " (github.com/alcaras/sliders/releases).") end,
 	lock = function() setLocked(true) P("the shard line is locked (right-click it or /sliders unlock to move it).") end,
 	unlock = function() setLocked(false) P("the shard line is unlocked: drag it, then right-click to lock.") end,
 	chat = function(arg)
@@ -924,5 +930,5 @@ commands = {
 ns.commands = commands
 SlashCmdList.SLIDERS = L.Slash(commands, "/sliders: your shard | /sliders shards: the shards here, with Hop | /sliders open"
 	.. " off | solo | group | /sliders invite ask | auto | /sliders hop <server> | /sliders ping [name] | /sliders log [n]"
-	.. " | /sliders after stay | leave | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders"
+	.. " | /sliders after stay | leave | /sliders version | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders"
 	.. " strangers on | off | /sliders minimap", P)
