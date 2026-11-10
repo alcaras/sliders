@@ -60,6 +60,8 @@ local hosting                 -- host side: { req, guest, t } while a guest is i
 local helloSent = false
 local openFlag                -- the open flag last advertised
 local advertised = {}         -- the shard and map last advertised
+local movePending             -- Blizzard scheduled a shard move for us (SHARD_TRANSFER_IMMINENT): not a host until it
+                              -- happens or is cancelled, or a guest could land on a shard we are about to leave
 
 -- ---------------------------------------------------------------- names (Sliders.lua)
 local realm, norm, first, ownFull = A.realm, A.norm, A.first, A.ownFull
@@ -101,6 +103,7 @@ local function closedWhy(kind)
 	if kind == "CHANNEL" and not char.strangers then return "closed" end
 	if A.instanced() or A.paused() then return "busy" end
 	if L.Read(UnitIsAFK, "player") == true then return "busy" end
+	if movePending then return "busy" end
 	if A.inGroup() and not hosting then
 		if char.open ~= "group" then return "full" end
 		if inRaid() or not A.isLeader() or A.groupSize() >= SPAM.party then return "full" end
@@ -463,6 +466,11 @@ ns.hooks.joined = function()
 end
 
 ns.hooks.imminent = function(sec)
+	local mine = {}
+	movePending = mine
+	-- a countdown that neither moves nor cancels (a loading screen in between): closed again at most 30 s after it
+	L.After((sec or 300) + 30, function() if movePending == mine then movePending = nil refreshOpen() end end, "move")
+	refreshOpen()
 	if not hop or (hop.phase ~= "joined" and hop.phase ~= "accepting") then return end
 	hop.countdown = sec and (math.floor(sec) .. "s") or "?"
 	if refreshButton then refreshButton:Show() end
@@ -473,6 +481,7 @@ end
 local LEAVE_AFTER = 3
 ns.hooks.transfer = function(moved)
 	if refreshButton then refreshButton:Hide() end
+	if movePending then movePending = nil refreshOpen() end
 	if not (moved and hop and (hop.phase == "joined" or hop.phase == "accepting")) then return end
 	local h = hop
 	h.transfer, h.tMove = true, now()
@@ -920,7 +929,8 @@ function ns.Shards()
 	return list
 end
 
-local WHY_CLOSED = { busy = "Open for invites is paused right now: an instance, a flight, away, or your party is queued.",
+local WHY_CLOSED = { busy = "Open for invites is paused right now: an instance, a flight, away, your party is queued,"
+	.. " or the game is about to move you to another shard.",
 	full = "Open for invites is paused right now: you are in a group (or it has no room, or you don't lead it)." }
 
 function ns.RefreshPanel()
