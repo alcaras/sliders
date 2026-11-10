@@ -340,7 +340,7 @@ end
 -- ---------------------------------------------------------------- the guest's hop
 local refreshButton
 
-local function endHop(text, ok)
+local function endHop(text, ok, stay)
 	if not hop then return end
 	local h = hop
 	hop = nil
@@ -348,8 +348,8 @@ local function endHop(text, ok)
 	quietEnd(10)
 	if refreshButton then refreshButton:Hide() end
 	if not ok then tried[h.host.key] = now() end
-	if (h.phase == "joined" or h.phase == "accepting" or h.phase == "moved") and A.inGroup() then
-		pcall(C_PartyInfo.LeaveParty)   -- the hop's own group: leaving keeps the new shard
+	if not stay and (h.phase == "joined" or h.phase == "accepting" or h.phase == "moved") and A.inGroup() then
+		pcall(C_PartyInfo.LeaveParty)   -- the hop's own group (a failed hop, or "after the move: leave")
 	end
 	log(("hop_%s %s host %s: %s; ask->invite %s, invite->move %s, countdown %s, transfer %s"):format(
 		ok and "done" or "failed", h.req, h.host.name, text, h.tInvite and (math.floor(h.tInvite - h.t) .. "s") or "-",
@@ -485,6 +485,7 @@ ns.hooks.transfer = function(moved)
 	if not (moved and hop and (hop.phase == "joined" or hop.phase == "accepting")) then return end
 	local h = hop
 	h.transfer, h.tMove = true, now()
+	if char.afterHop ~= "leave" then return end   -- "stay": the guest stays in the host's group (the key ends the hop)
 	L.After(LEAVE_AFTER, function()
 		if hop ~= h or h.phase == "moved" then return end
 		h.phase = "moved"
@@ -591,8 +592,10 @@ ns.hooks.key = function(key)
 		hop.tMove = hop.tMove or now()
 		local cr = hop.host.name
 		sendTo(hop.host, ("DONE2;%s;%s;%s"):format(hop.host.key, hop.req, key))
-		endHop(key == hop.shard and ("moved to %s via %s."):format(A.label(key), cr)
-			or ("moved to %s (not %s's shard)."):format(A.label(key), cr), true)
+		local stay = char.afterHop ~= "leave" and A.inGroup()
+		local where = key == hop.shard and ("moved to %s via %s."):format(A.label(key), cr)
+			or ("moved to %s (not %s's shard)."):format(A.label(key), cr)
+		endHop(stay and (where .. (" You stay in %s's group: leaving may move you back."):format(cr)) or where, true, stay)
 	end
 	-- a re-confirm of the same shard (after a join, a transfer, a reload) is no news
 	local map = A.mapID()
@@ -645,6 +648,9 @@ ns.hooks.load = function()
 	char = ns.char
 	if char.open ~= "solo" and char.open ~= "group" then char.open = "off" end   -- default: not open
 	if char.invite ~= "auto" then char.invite = "ask" end
+	-- after the move: stay in the host's group (default; alcaras 2026-11-09: leaving once moved him to another shard)
+	-- or leave 3 s after it
+	if char.afterHop ~= "leave" then char.afterHop = "stay" end
 	char.strangers = char.strangers == true
 end
 
@@ -879,6 +885,14 @@ local inviteSeg = segmented({ { "ask", "Ask me", 96 }, { "auto", "Invite friends
 	log("invite " .. mode)
 	ns.RefreshPanel()
 end)
+local afterLabel = text(panel, 10.5, C.gold, true)
+afterLabel:SetText("AFTER YOUR HOP")
+local afterSeg = segmented({ { "stay", "Stay in the group", 140 }, { "leave", "Leave the group", 130 } }, function(mode)
+	if not char then return end
+	char.afterHop = mode
+	log("after " .. mode)
+	ns.RefreshPanel()
+end)
 local hint = text(panel, 10, C.muted)
 hint:SetWidth(W - 2 * PAD)
 
@@ -906,6 +920,7 @@ function ns.Shards()
 			if s then
 				local e = get(s)
 				e.seen = math.max(e.seen or 0, rec.last or 0)
+				if not e.crowd and s ~= cur then e.crowd = ns.crowd(s) end   -- what we saw when we were there
 			end
 		end
 	end
@@ -988,7 +1003,11 @@ function ns.RefreshPanel()
 	y = y - 16 - 28 - 12
 	place(inviteLabel, y)
 	place(inviteSeg, y - 16)
+	y = y - 16 - 28 - 12
+	place(afterLabel, y)
+	place(afterSeg, y - 16)
 	y = y - 16 - 28 - 14
+	afterSeg:Select(char and char.afterHop or "stay")
 	local mode = char and char.open or "off"
 	openSeg:Select(mode)
 	inviteSeg:Select(char and char.invite or "ask")
@@ -1070,6 +1089,14 @@ ns.commands.invite = function(arg)
 	log("invite " .. char.invite)
 	if ns.RefreshPanel then ns.RefreshPanel() end
 	P(char.invite == "ask" and "each hop request asks you first." or "friends' hop requests are invited at once.")
+end
+ns.commands.after = function(arg)
+	if not char then return end
+	if arg == "stay" or arg == "leave" then char.afterHop = arg
+	else P("/sliders after stay | leave: after your hop, stay in the host's group (leaving may move you back) or leave.") return end
+	log("after " .. char.afterHop)
+	if ns.RefreshPanel then ns.RefreshPanel() end
+	P(char.afterHop == "stay" and "after a hop you stay in the host's group." or "after a hop Sliders leaves the group 3 s after the move.")
 end
 ns.commands.strangers = function(arg)
 	if not char then return end

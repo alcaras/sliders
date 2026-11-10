@@ -87,11 +87,12 @@ end
 -- route named it (Battle.net gives "Living Flame", addon messages "LivingFlame"); a bare "Name" is on our realm
 local ownRealm
 local function realm()
-	if not ownRealm then
-		local r = L.Value(L.Read(GetNormalizedRealmName)) or L.Value(L.Read(GetRealmName))
-		ownRealm = type(r) == "string" and r or "?"
-	end
-	return ownRealm
+	if ownRealm then return ownRealm end
+	local r = L.Value(L.Read(GetNormalizedRealmName))
+	if type(r) ~= "string" or r == "" then r = L.Value(L.Read(GetRealmName)) end
+	if type(r) ~= "string" or r == "" then return "?" end   -- not readable yet: asked again next time, never cached
+	ownRealm = r
+	return r
 end
 local function norm(full)
 	if type(full) ~= "string" then return nil end
@@ -106,7 +107,19 @@ local function ownFull()
 	return (type(name) == "string" and name or "?") .. "-" .. realm()
 end
 -- a message from this character (guild and channel echo our own sends); another player with our first name is not us
-function ns.isSelf(full) return full ~= nil and norm(full) == norm(ownFull()) end
+local sentBodies = {}   -- body -> GetTime() we sent it (guild and channel echo our own messages back)
+local function sentRecently(body)
+	local t = body and sentBodies[body]
+	return t ~= nil and (L.Num(GetTime()) or 0) - t < 10
+end
+-- our own echo: the same full name, or (the realm spelled another way: alcaras' "Alcara" showed up as a friend on his
+-- own shard in 0.3.1) our first name with a message we sent ourselves a moment ago. Another player with our first name
+-- on another realm is not us.
+function ns.isSelf(full, body)
+	if full == nil then return false end
+	if norm(full) == norm(ownFull()) then return true end
+	return firstName(full):lower() == firstName(ownFull()):lower() and sentRecently(body)
+end
 
 -- "41 s", "3 min"
 local function age(sec)
@@ -337,7 +350,7 @@ end
 local function onAddonMessage(_, prefix, body, channel, sender)
 	prefix, body, channel, sender = L.Value(prefix), L.Value(body), L.Value(channel), L.Value(sender)
 	if prefix ~= PREFIX or type(body) ~= "string" or type(sender) ~= "string" then return end
-	if ns.isSelf(sender) then return end
+	if ns.isSelf(sender, body) then return end
 	local first = firstName(sender)
 	local v, id, key, age = strsplit(";", body)
 	if v == "P1" or v == "R1" then
@@ -393,6 +406,10 @@ end
 -- "ok", or why not (the SendAddonMessageResult in words)
 function ns.sendRoute(route, msg, target)
 	local ok, r
+	sentBodies[msg] = now()
+	if next(sentBodies) and math.random() < 0.05 then   -- now and then: forget the old ones
+		for b, t in pairs(sentBodies) do if now() - t > 60 then sentBodies[b] = nil end end
+	end
 	if route == "BN" then
 		if not (C_BattleNet and C_BattleNet.SendGameData) then return "no Battle.net" end
 		ok, r = pcall(C_BattleNet.SendGameData, target, PREFIX, msg)
@@ -516,17 +533,28 @@ ns.api = {
 }
 
 -- players seen on this shard in the last 5 minutes (target, mouseover, nameplates): how crowded it is
-function ns.crowd()
+local lastCrowd = {}   -- shard -> { n, t = time() }: players seen there the last time we were on it (this session)
+-- players seen on `shard` (default: ours) in the last 5 minutes; for a shard we left, the count from when we left it
+-- and when that was
+function ns.crowd(shard)
+	if shard and shard ~= current then
+		local c = lastCrowd[shard]
+		return c and c.n, c and c.t
+	end
 	local n, t = 0, now()
 	for g, p in pairs(players) do
 		if t - p.t > 300 then players[g] = nil elseif p.key == current then n = n + 1 end
 	end
+	if current then lastCrowd[current] = { n = n, t = stamp() } end
 	return n
 end
 
 -- ---------------------------------------------------------------- keys
 local function reset(why)
-	if current then prev = { key = current, map = mapID(), why = why } end
+	if current then
+		prev = { key = current, map = mapID(), why = why }
+		ns.crowd()   -- keep the count for the shard we leave
+	end
 	current, currentSince, tentative = nil, nil, nil
 	wipe(window)
 	show()
@@ -896,5 +924,5 @@ commands = {
 ns.commands = commands
 SlashCmdList.SLIDERS = L.Slash(commands, "/sliders: your shard | /sliders shards: the shards here, with Hop | /sliders open"
 	.. " off | solo | group | /sliders invite ask | auto | /sliders hop <server> | /sliders ping [name] | /sliders log [n]"
-	.. " | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders"
+	.. " | /sliders after stay | leave | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders"
 	.. " strangers on | off | /sliders minimap", P)
