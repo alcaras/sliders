@@ -221,6 +221,23 @@ function L.RestorePoint(frame, pos, default)
 end
 
 -- left-drag moves the frame; on release onMoved(pos) gets SavePoint's table
+-- a 1 px border around `region` (default: the frame), drawn on `frame`; returns its four textures
+function L.Border(frame, c, region)
+	region = region or frame
+	local list = {}
+	for _, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
+		local t = frame:CreateTexture(nil, "BORDER")
+		t:SetColorTexture(c[1], c[2], c[3], c[4] or 1)
+		if side == "TOP" or side == "BOTTOM" then
+			t:SetPoint(side .. "LEFT", region, side .. "LEFT") t:SetPoint(side .. "RIGHT", region, side .. "RIGHT") t:SetHeight(1)
+		else
+			t:SetPoint("TOP" .. side, region, "TOP" .. side) t:SetPoint("BOTTOM" .. side, region, "BOTTOM" .. side) t:SetWidth(1)
+		end
+		list[#list + 1] = t
+	end
+	return list
+end
+
 function L.Movable(frame, onMoved)
 	frame:SetMovable(true)
 	frame:EnableMouse(true)

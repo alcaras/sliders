@@ -59,33 +59,28 @@ local autoLog = {}            -- host side: now() of each automatic invite
 local hosting                 -- host side: { req, guest, t } while a guest is invited
 local helloSent = false
 local openFlag                -- the open flag last advertised
+local advertised = {}         -- the shard and map last advertised
 
--- ---------------------------------------------------------------- names
-local ownRealm
-local function realm()
-	if not ownRealm then
-		local r = L.Value(L.Read(GetNormalizedRealmName)) or L.Value(L.Read(GetRealmName))
-		ownRealm = type(r) == "string" and r or "?"
-	end
-	return ownRealm
-end
-
--- "Name-Realm" -> "name-realm" without spaces or apostrophes: one key per character, whatever route named it
-local function norm(full)
-	if type(full) ~= "string" then return nil end
-	local name, r = full:match("^([^%-]+)%-?(.*)$")
-	if not name then return nil end
-	if r == "" then r = realm() end
-	return (name .. "-" .. r:gsub("[%s'%-]", "")):lower()
-end
-
-local function first(full) return type(full) == "string" and (full:match("^[^%-]+") or full) or "?" end
-
-local function ownFull()
-	local name = L.Value(L.Read(UnitName, "player"))
-	return (type(name) == "string" and name or "?") .. "-" .. realm()
-end
+-- ---------------------------------------------------------------- names (Sliders.lua)
+local realm, norm, first, ownFull = A.realm, A.norm, A.first, A.ownFull
 local function ownKey() return norm(ownFull()) end
+
+-- online character friends, by key (a whisper contact counts as a friend only if it is on the friends list)
+local function friendKeys()
+	local set = {}
+	for _, name in ipairs(A.charFriends()) do set[norm(name)] = true end
+	return set
+end
+
+-- a contact we can reach right now: Battle.net and whisper contacts must be online; guild and channel are broadcasts
+local function online(c, friends)
+	if c.route == "BN" then
+		local info = C_BattleNet and L.Read(C_BattleNet.GetGameAccountInfoByID, c.target)
+		return type(info) == "table" and L.Value(info.isOnline) == true
+	end
+	if c.route == "WHISPER" then return (friends or friendKeys())[c.key] == true end
+	return true
+end
 
 -- ---------------------------------------------------------------- open for invites
 local function inRaid() return L.Read(IsInRaid) == true end
@@ -143,8 +138,10 @@ local function sendKind(kind, ask)
 	if kind == "direct" then
 		local n = 0
 		local msg = "ST2;" .. statusFields("direct") .. ";0"
+		local friends = friendKeys()
 		for _, c in pairs(contacts) do
-			if (c.route == "BN" or c.route == "WHISPER") and n < SPAM.fanout then
+			-- friends only (a stranger who whispered once gets no pushes), and only while they are online
+			if (c.route == "BN" or c.route == "WHISPER") and c.friend and n < SPAM.fanout and online(c, friends) then
 				n = n + 1
 				sendTo(c, msg)
 			end
@@ -226,7 +223,9 @@ local function contactFrom(channel, sender, bnID)
 		c.route, c.target = route, target
 	end
 	if route == "GUILD" then c.guild = true end
-	if route ~= "CHANNEL" then c.friend = true end   -- Battle.net, whisper (a friend's hello) and guild: shown by name
+	-- Battle.net friends, guild members and character friends are friends (shown by name, auto-invited); a whisper from
+	-- anyone else is a stranger, like the channel
+	if route == "BN" or route == "GUILD" or (route == "WHISPER" and friendKeys()[key]) then c.friend = true end
 	return c, route
 end
 
@@ -263,6 +262,78 @@ local function answer(c, route, map)
 	end, "answer")
 end
 
+-- ---------------------------------------------------------------- quiet: the hop's own group lines
+-- The hop's messages are addon messages (nobody sees them); the game's own system lines are not: "Bnpal joins the
+-- party.", "You leave the group.", "Your group has been disbanded." ... alcaras: "the invites / joining leaving will
+-- be annoying enough". While a hop runs (guest, host, and the host's party members told over PARTY with QT2), those
+-- lines are filtered out of chat: the ones that name the hop's partner, and the nameless group lines, for the hop's
+-- few seconds only. Everything else in chat is untouched.
+local QUIET_NAMED = { "ERR_JOINED_GROUP_S", "ERR_LEFT_GROUP_S", "ERR_INVITE_PLAYER_S", "ERR_NEW_LEADER_S",
+	"ERR_DECLINE_GROUP_S", "ERR_PARTY_CONVERTED_TO_RAID_S" }
+local QUIET_PLAIN = { "ERR_LEFT_GROUP_YOU", "ERR_GROUP_DISBANDED", "JOINED_PARTY", "ERR_NEW_LEADER_YOU",
+	"ERR_DUNGEON_DIFFICULTY_CHANGED_S", "ERR_RAID_DIFFICULTY_CHANGED_S", "ERR_LEGACY_RAID_DIFFICULTY_CHANGED_S" }
+local QUIET_FOR = 90          -- s a window stays open at most
+local quietNames, quietUntil = {}, 0
+local patterns                -- built on first use, from the client's GlobalStrings
+
+-- colour codes and links out, brackets out: "|Hplayer:Bnpal|h[Bnpal]|h joins the party." -> "Bnpal joins the party."
+local function plainText(s)
+	s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h(.-)|h", "%1"):gsub("[%[%]]", "")
+	return s
+end
+
+-- a GlobalStrings format -> a Lua pattern: "%s joins the party." -> "^(.+) joins the party%.$" ("%1$s" too)
+local function toPattern(fmt)
+	local p = plainText(fmt):gsub("%%%d%$([sd])", "%%%1")
+	p = p:gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1")
+	p = p:gsub("%%s", "(.+)"):gsub("%%d", "%%d+")
+	return "^" .. p .. "$"
+end
+
+local function buildPatterns()
+	patterns = { named = {}, plain = {} }
+	for kind, list in pairs({ named = QUIET_NAMED, plain = QUIET_PLAIN }) do
+		for _, key in ipairs(list) do
+			local fmt = _G[key]
+			if type(fmt) == "string" and fmt ~= "" then patterns[kind][#patterns[kind] + 1] = toPattern(fmt) end
+		end
+	end
+end
+
+-- open (or extend) the window for these first names
+local function quiet(...)
+	for i = 1, select("#", ...) do
+		local n = select(i, ...)
+		if type(n) == "string" then quietNames[first(n):lower()] = true end
+	end
+	quietUntil = now() + QUIET_FOR
+end
+local function quietEnd(after)
+	quietUntil = math.min(quietUntil, now() + (after or 10))
+end
+
+function ns.quietFilter(_, _, msg)
+	if now() > quietUntil then
+		if next(quietNames) then wipe(quietNames) end
+		return false
+	end
+	msg = L.Value(msg)
+	if type(msg) ~= "string" then return false end
+	if not patterns then buildPatterns() end
+	msg = plainText(msg)
+	for _, p in ipairs(patterns.plain) do if msg:match(p) then return true end end
+	for _, p in ipairs(patterns.named) do
+		local who = msg:match(p)
+		if who and quietNames[first(who):lower()] then return true end
+	end
+	return false
+end
+
+do
+	local add = ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter
+	if type(add) == "function" then pcall(add, "CHAT_MSG_SYSTEM", ns.quietFilter) end
+end
+
 -- ---------------------------------------------------------------- the guest's hop
 local refreshButton
 
@@ -271,6 +342,7 @@ local function endHop(text, ok)
 	local h = hop
 	hop = nil
 	lastHop = now()
+	quietEnd(10)
 	if refreshButton then refreshButton:Hide() end
 	if not ok then tried[h.host.key] = now() end
 	if (h.phase == "joined" or h.phase == "accepting" or h.phase == "moved") and A.inGroup() then
@@ -286,10 +358,11 @@ end
 
 local function pickHost(shard, map)
 	local best
+	local friends = friendKeys()
 	for _, c in pairs(contacts) do
 		local st = c.st
 		if st and st.open and st.shard == shard and st.map == map and now() - st.t < SPAM.fresh
-			and now() - (tried[c.key] or -1e9) > SPAM.tried then
+			and now() - (tried[c.key] or -1e9) > SPAM.tried and online(c, friends) then
 			if not best or RANK[c.route] > RANK[best.route] or (RANK[c.route] == RANK[best.route] and st.t > best.st.t) then
 				best = c
 			end
@@ -315,6 +388,7 @@ function ns.Hop(shard)
 	if not host then P(("nobody open for invites is on %s right now."):format(A.label(shard))) return end
 	local req = ("%d%03d"):format(A.stamp() % 100000, math.random(0, 999))
 	hop = { req = req, host = host, shard = shard, from = cur, map = map, t = now(), phase = "asked" }
+	quiet(host.name)
 	local r = sendTo(host, ("HOP2;%s;%s;%d;%s;%s"):format(host.key, req, map, shard, ownFull()))
 	log(("hop_ask %s host %s by %s shard %s from %s: %s"):format(req, host.name, ROUTE_NAME[host.route], shard, cur, r))
 	if r ~= "ok" then endHop(("could not reach %s (%s)."):format(host.name, r), false) return end
@@ -348,9 +422,13 @@ ns.hooks.invite = function(name, inviterGUID)
 	if not hop or (hop.phase ~= "asked" and hop.phase ~= "invited") then return end
 	local match
 	if hop.hostGUID and hop.hostGUID ~= "" then match = inviterGUID == hop.hostGUID
-	else match = first(name) == hop.host.name end
+	else match = norm(name) == hop.host.key end
 	if not match then return end   -- any other invite stays with Blizzard's popup
 	hop.phase, hop.tInvite = "accepting", now()
+	local h = hop
+	L.After(SPAM.inviteTimeout, function()   -- never joined (declined, expired, Accept not clicked): the hop ends
+		if hop == h and h.phase == "accepting" then endHop(("the invite from %s was not accepted."):format(h.host.name), false) end
+	end, "hop")
 	-- AcceptGroup has no flag in Forever's index (an undocumented global); retail addons call it on an invite. If the
 	-- game blocks it (ADDON_ACTION_BLOCKED below), Blizzard's popup is still up: the user clicks Accept, and this
 	-- character stops trying (char.manualAccept)
@@ -372,6 +450,7 @@ L.On("ADDON_ACTION_BLOCKED", function(_, who, func)
 end, "blocked")
 
 ns.hooks.joined = function()
+	if hosting then hosting.joined = true end
 	if not hop or hop.phase ~= "accepting" then return end
 	hop.phase = "joined"
 	pcall(StaticPopup_Hide, "PARTY_INVITE")   -- joined: Blizzard's invite popup, if still up, has nothing left to do
@@ -412,6 +491,7 @@ ns.hooks.transfer = function(moved)
 end
 
 ns.hooks.left = function()
+	if hosting then quietEnd(10) end
 	hosting = nil
 	if hop and hop.phase == "joined" then endHop("the group ended before the move.", false) end
 	refreshOpen()
@@ -428,7 +508,22 @@ local function invite(c, req, guestFull)
 		return
 	end
 	sendTo(c, ("OK2;%s;%s;%s"):format(c.key, req, L.Value(L.Read(UnitGUID, "player")) or ""))
-	if not A.inGroup() then hosting = { req = req, guest = c.key, t = now() } end
+	quiet(guestFull)
+	if A.inGroup() and not A.lockdown() then   -- the party's other Sliders users hide the guest's join and leave too
+		pcall(C_ChatInfo.SendAddonMessage, A.PREFIX, "QT2;" .. first(guestFull), "PARTY")
+	end
+	if not A.inGroup() then
+		local hh = { req = req, guest = c.key, t = now() }
+		hosting = hh
+		-- declined, expired or failed: no join within the invite's life, so this is no longer a hop's group
+		L.After(SPAM.inviteTimeout, function()
+			if hosting == hh and not hh.joined then
+				hosting = nil
+				log(("host_expired %s %s"):format(req, c.name))
+				refreshOpen()
+			end
+		end, "hosting")
+	end
 	pcall(C_PartyInfo.InviteUnit, guestFull)
 	log(("host_invite %s %s"):format(req, guestFull))
 end
@@ -436,7 +531,7 @@ end
 local function onHopRequest(c, req, map, shard, guestFull)
 	if now() - (asked[c.key] or -1e9) < SPAM.perRequester then return end   -- one request per requester per 2 min
 	asked[c.key] = now()
-	local why = closedWhy(c.route == "CHANNEL" and "CHANNEL" or "direct")
+	local why = closedWhy(c.friend and "direct" or "CHANNEL")
 	if not why and L.InCombat() then why = "combat" end
 	if not why and (tonumber(map) ~= A.mapID() or A.shardOf(shard) ~= A.current()) then why = "moved" end
 	log(("host_request %s from %s by %s: %s"):format(req, c.name, ROUTE_NAME[c.route], why or "ok"))
@@ -456,6 +551,10 @@ end
 ns.hooks.message = function(body, channel, sender, bnID)
 	local f = { strsplit(";", body) }
 	local v = f[1]
+	if v == "QT2" then   -- the party's host is about to invite a hop guest: hide that guest's join and leave
+		if channel == "PARTY" and f[2] then quiet(f[2]) end
+		return
+	end
 	if v ~= "HI2" and v ~= "ST2" and v ~= "HOP2" and v ~= "OK2" and v ~= "NO2" and v ~= "DONE2" then return end
 	local c, route = contactFrom(channel, sender, bnID)
 	if not c then return end
@@ -486,7 +585,12 @@ ns.hooks.key = function(key)
 		endHop(key == hop.shard and ("moved to %s via %s."):format(A.label(key), cr)
 			or ("moved to %s (not %s's shard)."):format(A.label(key), cr), true)
 	end
-	pushStatus()
+	-- a re-confirm of the same shard (after a join, a transfer, a reload) is no news
+	local map = A.mapID()
+	if key ~= advertised.shard or map ~= advertised.map then
+		advertised.shard, advertised.map = key, map
+		pushStatus()
+	end
 	if ns.RefreshPanel then ns.RefreshPanel() end
 end
 
@@ -556,21 +660,7 @@ local function text(parent, size, color, bold)
 end
 
 -- a 1 px border; returns its four textures (a button recolours them)
-local function edge(f, c)
-	c = c or C.line
-	local list = {}
-	for _, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
-		local t = f:CreateTexture(nil, "BORDER")
-		t:SetColorTexture(c[1], c[2], c[3], c[4] or 1)
-		if side == "TOP" or side == "BOTTOM" then
-			t:SetPoint(side .. "LEFT") t:SetPoint(side .. "RIGHT") t:SetHeight(1)
-		else
-			t:SetPoint("TOP" .. side) t:SetPoint("BOTTOM" .. side) t:SetWidth(1)
-		end
-		list[#list + 1] = t
-	end
-	return list
-end
+local function edge(f, c) return L.Border(f, c or C.line) end
 
 -- a flat button: "primary" (filled action blue, white label: Hop, Invite, Refresh now), "plain" (AlcPrices' button:
 -- a light fill, the label in the action blue), "tab" (a segment: unselected quiet, selected like primary)
@@ -661,6 +751,11 @@ do
 	local no = pill(popup, "No", 90, "plain", function() popup:Decline() end)
 	no:SetPoint("BOTTOMRIGHT", -12, 10)
 	function popup:Ask(c, req, full)
+		local old = self.q
+		if old and now() - old.t < 60 then   -- one request at a time: the earlier one is told, not left to time out
+			sendTo(old.c, ("NO2;%s;%s;busy"):format(old.c.key, old.req))
+			log(("host_replaced %s %s"):format(old.req, old.c.name))
+		end
 		self.q = { c = c, req = req, full = full, t = now() }
 		t:SetText(("%s asks to hop to your shard."):format(c.name))
 		self:Show()
@@ -783,12 +878,7 @@ local function place(region, y, x)
 	region:SetPoint("TOPLEFT", panel, "TOPLEFT", x or PAD, y)
 end
 
-local function ago(t)
-	local s = math.floor(t)
-	if s < 90 then return "now" end
-	if s < 5400 then return math.floor(s / 60 + 0.5) .. " min ago" end
-	return math.floor(s / 3600 + 0.5) .. " h ago"
-end
+local function ago(t) return t < 90 and "now" or (A.age(t) .. " ago") end
 
 -- shard -> { shard, you, seen (stamp), people = { contact }, open = n, crowd }
 function ns.Shards()

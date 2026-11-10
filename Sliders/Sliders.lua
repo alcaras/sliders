@@ -26,6 +26,8 @@ local LAYOUT = {
 	width = 140, height = 18,
 	font = 12,
 	box = { 0.04, 0.04, 0.05, 0.85 }, edge = { 0.55, 0.80, 1.00, 0.9 },   -- unlocked: AlcPrices' panel and action blue
+	boxPadX = 6, boxPadY = 4,        -- the unlocked box around the text
+	hintFont = 10, hintGap = 6,      -- the hint under it
 	grey = { 0.55, 0.55, 0.55 },     -- unconfirmed or stale
 	white = { 0.9, 0.9, 0.9 },       -- confirmed
 }
@@ -40,7 +42,7 @@ local RULE = {
 	stale = 120,     -- no read for this long: the shown key turns grey
 }
 -- rings are trimmed in batches of `slack` (L.Cap shifts the whole list)
-local KEEP = { log = 1000, sightings = 4000, slack = 100, labelHours = 12, keyDays = 14, sightEvery = 20, sendEvery = 30 }
+local KEEP = { log = 1000, sightings = 4000, slack = 100, keyDays = 14, sightEvery = 20, sendEvery = 30 }
 local PREFIX = "Sliders"
 local KINDS = { Creature = true, Vehicle = true }
 
@@ -78,6 +80,39 @@ local function stamp() return L.Num(time()) or 0 end
 -- ---------------------------------------------------------------- context
 local function mapID()
 	return L.Num(L.Read(C_Map.GetBestMapForUnit, "player"))
+end
+
+-- ---------------------------------------------------------------- names
+-- "Name-Realm" -> "name-realm" (the realm without spaces, apostrophes or hyphens): one key per character, whatever
+-- route named it (Battle.net gives "Living Flame", addon messages "LivingFlame"); a bare "Name" is on our realm
+local ownRealm
+local function realm()
+	if not ownRealm then
+		local r = L.Value(L.Read(GetNormalizedRealmName)) or L.Value(L.Read(GetRealmName))
+		ownRealm = type(r) == "string" and r or "?"
+	end
+	return ownRealm
+end
+local function norm(full)
+	if type(full) ~= "string" then return nil end
+	local name, r = full:match("^([^%-]+)%-?(.*)$")
+	if not name then return nil end
+	if r == "" then r = realm() end
+	return (name .. "-" .. r:gsub("[%s'%-]", "")):lower()
+end
+local function firstName(full) return type(full) == "string" and (full:match("^[^%s%-]+") or full) or "?" end
+local function ownFull()
+	local name = L.Value(L.Read(UnitName, "player"))
+	return (type(name) == "string" and name or "?") .. "-" .. realm()
+end
+-- a message from this character (guild and channel echo our own sends); another player with our first name is not us
+function ns.isSelf(full) return full ~= nil and norm(full) == norm(ownFull()) end
+
+-- "41 s", "3 min"
+local function age(sec)
+	sec = math.floor(sec)
+	if sec < 90 then return sec .. " s" end
+	return math.floor(sec / 60 + 0.5) .. " min"
 end
 
 local function mapName(id)
@@ -125,7 +160,7 @@ local function charData()
 	local key = L.CharKey()
 	local c = db.chars[key]
 	if not c then
-		c = { maps = {}, labels = {}, log = {}, sightings = {} }
+		c = { maps = {}, log = {}, sightings = {} }
 		db.chars[key] = c
 	end
 	return c
@@ -188,22 +223,13 @@ text:SetTextColor(LAYOUT.grey[1], LAYOUT.grey[2], LAYOUT.grey[3])
 local unlockedParts = {}
 do
 	local bg = frame:CreateTexture(nil, "BACKGROUND")
-	bg:SetPoint("TOPLEFT", -6, 4) bg:SetPoint("BOTTOMRIGHT", 6, -4)
+	bg:SetPoint("TOPLEFT", -LAYOUT.boxPadX, LAYOUT.boxPadY) bg:SetPoint("BOTTOMRIGHT", LAYOUT.boxPadX, -LAYOUT.boxPadY)
 	bg:SetColorTexture(LAYOUT.box[1], LAYOUT.box[2], LAYOUT.box[3], LAYOUT.box[4])
 	unlockedParts[#unlockedParts + 1] = bg
-	for _, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
-		local t = frame:CreateTexture(nil, "BORDER")
-		t:SetColorTexture(LAYOUT.edge[1], LAYOUT.edge[2], LAYOUT.edge[3], LAYOUT.edge[4])
-		if side == "TOP" or side == "BOTTOM" then
-			t:SetPoint(side .. "LEFT", bg, side .. "LEFT") t:SetPoint(side .. "RIGHT", bg, side .. "RIGHT") t:SetHeight(1)
-		else
-			t:SetPoint("TOP" .. side, bg, "TOP" .. side) t:SetPoint("BOTTOM" .. side, bg, "BOTTOM" .. side) t:SetWidth(1)
-		end
-		unlockedParts[#unlockedParts + 1] = t
-	end
+	for _, t in ipairs(L.Border(frame, LAYOUT.edge, bg)) do unlockedParts[#unlockedParts + 1] = t end
 	local hint = frame:CreateFontString(nil, "OVERLAY")
-	hint:SetFont(STANDARD_TEXT_FONT, 10, "OUTLINE")
-	hint:SetPoint("TOP", frame, "BOTTOM", 0, -6)
+	hint:SetFont(STANDARD_TEXT_FONT, LAYOUT.hintFont, "OUTLINE")
+	hint:SetPoint("TOP", frame, "BOTTOM", 0, -LAYOUT.hintGap)
 	hint:SetTextColor(LAYOUT.edge[1], LAYOUT.edge[2], LAYOUT.edge[3])
 	hint:SetText("Sliders: your shard. Drag me where you like, right-click to lock.")
 	unlockedParts[#unlockedParts + 1] = hint
@@ -311,8 +337,8 @@ end
 local function onAddonMessage(_, prefix, body, channel, sender)
 	prefix, body, channel, sender = L.Value(prefix), L.Value(body), L.Value(channel), L.Value(sender)
 	if prefix ~= PREFIX or type(body) ~= "string" or type(sender) ~= "string" then return end
-	local first = sender:match("^[^%s%-]+") or sender
-	if first == L.Value((UnitName("player"))) then return end
+	if ns.isSelf(sender) then return end
+	local first = firstName(sender)
 	local v, id, key, age = strsplit(";", body)
 	if v == "P1" or v == "R1" then
 		ns.onPing(v, id, key, age, channel, first, function(msg)
@@ -485,7 +511,8 @@ ns.api = {
 	P = P, say = say, log = log, now = now, stamp = stamp, mapID = mapID, mapName = mapName, label = labelOf,
 	serverOf = serverOf, shardOf = shardOf, current = function() return current end, inGroup = inGroup,
 	isLeader = isLeader, lockdown = lockdown, paused = paused, instanced = instanced, PREFIX = PREFIX,
-	charFriends = charFriends, bnFriends = bnFriends, groupSize = groupSize,
+	charFriends = charFriends, bnFriends = bnFriends, groupSize = groupSize, age = age, realm = realm, norm = norm,
+	first = firstName, ownFull = ownFull,
 }
 
 -- players seen on this shard in the last 5 minutes (target, mouseover, nameplates): how crowded it is
@@ -627,11 +654,6 @@ end
 ns.Read = read
 
 -- ---------------------------------------------------------------- tooltip
-local function age(sec)
-	sec = math.floor(sec)
-	if sec < 90 then return sec .. " s" end
-	return math.floor(sec / 60 + 0.5) .. " min"
-end
 
 local function inWindow(key)
 	local n, units = 0, {}

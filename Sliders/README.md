@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.0). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.1). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
@@ -31,6 +31,10 @@ This is a test version (0.3.0). It was called Portage before; remove the old `Po
 3. You accept the invite (Sliders does it for you when the game allows; otherwise click Accept).
 4. The server moves you within a second or two. Sliders leaves the group for you 3 seconds later, and you stay on
    the new shard.
+
+The hop's own messages are silent (addon messages nobody sees). The game's own group lines for the hop ("Bnpal
+joins the party", "You leave the group", "Your group has been disbanded") are hidden for the hop's few seconds, for
+you, the host and the host's party members who run Sliders. Nothing else in chat is touched.
 
 You must be out of a group, out of combat, and in the open world to hop.
 
