@@ -29,7 +29,8 @@ local SPAM = {
 	perRequester = 120,  -- a host considers one request per requester per 2 min
 	autoInvites = 5, autoWindow = 600,   -- an auto-inviting host: at most 5 invites per 10 min
 	answerTimeout = 20, inviteTimeout = 60, moveTimeout = 120,
-	fresh = 1800,        -- a status older than 30 min is not shown
+	fresh = 1800,        -- a channel stranger's status older than 30 min is not shown
+	guildFresh = 7200,   -- a guild member's: 2 h (their online state is not read here)
 	tried = 120,         -- a host that did not work is skipped for 2 min
 	party = 5,           -- a party's size; a host never invites past it (no raid conversion)
 }
@@ -82,6 +83,16 @@ local function online(c, friends)
 	end
 	if c.route == "WHISPER" then return (friends or friendKeys())[c.key] == true end
 	return true
+end
+
+-- a status is sent only on a change, so it holds until the next one: a Battle.net or character friend's shows while
+-- they are online (alcaras: friends vanished from the tooltip after 30 min in one zone); a guild member's for 2 h; a
+-- channel stranger's for 30 min
+local function current(c, friends)
+	local st = c.st
+	if not st then return false end
+	if c.route == "BN" or c.route == "WHISPER" then return online(c, friends) end
+	return now() - st.t < (c.route == "GUILD" and SPAM.guildFresh or SPAM.fresh)
 end
 
 -- ---------------------------------------------------------------- open for invites
@@ -367,9 +378,10 @@ end
 -- person), the freshest status kept; friendsOnly: Battle.net, character friends and guild
 local function people(friendsOnly)
 	local byName = {}
+	local friends = friendKeys()
 	for _, c in pairs(contacts) do
 		local st = c.st
-		if st and now() - st.t < SPAM.fresh and (c.friend or not friendsOnly) then
+		if st and current(c, friends) and (c.friend or not friendsOnly) then
 			local k = c.name:lower()
 			local old = byName[k]
 			if not old or st.t > old.st.t or (c.friend and not old.friend) then byName[k] = c end
@@ -436,8 +448,8 @@ local function pickHost(shard, map)
 	local friends = friendKeys()
 	for _, c in pairs(contacts) do
 		local st = c.st
-		if st and st.open and st.shard == shard and st.map == map and now() - st.t < SPAM.fresh
-			and now() - (tried[c.key] or -1e9) > SPAM.tried and online(c, friends) then
+		if st and st.open and st.shard == shard and st.map == map and current(c, friends)
+			and now() - (tried[c.key] or -1e9) > SPAM.tried then
 			if not best or RANK[c.route] > RANK[best.route] or (RANK[c.route] == RANK[best.route] and st.t > best.st.t) then
 				best = c
 			end
@@ -1005,7 +1017,7 @@ function ns.Shards()
 	end
 	for _, c in pairs(contacts) do
 		local st = c.st
-		if st and st.shard and st.map == map and now() - st.t < SPAM.fresh then
+		if st and st.shard and st.map == map and current(c) then
 			local e = get(st.shard)
 			e.people[#e.people + 1] = c
 			if st.open then e.open = e.open + 1 end
@@ -1129,14 +1141,18 @@ do
 end
 
 -- ---------------------------------------------------------------- minimap button (LibDBIcon, embedded under Libs/)
+-- the same glance as the shard line's tooltip (your shard, your friends' shards), with the button's own hint
 local function iconTooltip(tt)
-	tt:AddLine("Sliders " .. VERSION)
-	local cur = A.current()
-	tt:AddLine(cur and ("You are on " .. A.label(cur)) or "Shard not known yet", 1, 1, 1)
+	if ns.tooltip then ns.tooltip(tt, "Click: shards here  ·  Drag: move this button") end
+end
+
+-- for the tooltips: whether you are open for hop invites, and if not right now, why
+function ns.openText()
 	local mode = char and char.open or "off"
-	tt:AddLine(mode == "off" and "Not open for hop invites" or (mode == "solo" and "Open for hop invites when solo"
-		or "Open for hop invites when your party has room"), 0.8, 0.8, 0.8)
-	tt:AddLine("Click: the shards here · Drag: move this button", 0.6, 0.6, 0.6)
+	if mode == "off" then return nil end
+	local why = closedWhy("direct")
+	local what = mode == "solo" and "Open for hop invites when solo" or "Open for hop invites when your party has room"
+	return why and (what .. " (paused now)") or what
 end
 
 local dbi

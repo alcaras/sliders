@@ -749,7 +749,7 @@ local TIP = { gold = { 1, 0.82, 0 }, white = { 1, 1, 1 }, muted = { 0.6, 0.6, 0.
 local function tipLine(tt, text, c) tt:AddLine(text, c[1], c[2], c[3], true) end
 local function tipPair(tt, left, right, lc, rc) tt:AddDoubleLine(left, right, lc[1], lc[2], lc[3], rc[1], rc[2], rc[3]) end
 
-local function tooltip(tt)
+local function tooltip(tt, hint)
 	tipPair(tt, "Sliders", ns.VERSION, TIP.gold, TIP.muted)
 	local why = paused()
 	local key = current or tentative
@@ -773,18 +773,22 @@ local function tooltip(tt)
 		if #offShard == 0 then tipLine(tt, "Party: everyone on the party's shard", TIP.muted)
 		else tipLine(tt, "Party: not on the party's shard: " .. table.concat(offShard, ", "), TIP.warn) end
 	end
+	local open = ns.openText and ns.openText()
+	if open then tipLine(tt, open, TIP.muted) end
 	local rows = ns.friendRows and ns.friendRows() or {}
-	if #rows > 0 then
-		tt:AddLine(" ")
-		tipLine(tt, "Friends with Sliders", TIP.gold)
+	tt:AddLine(" ")
+	tipLine(tt, "Friends with Sliders", TIP.gold)
+	if #rows == 0 then
+		tipLine(tt, "None online. Friends show here once they run Sliders too.", TIP.muted)
+	else
 		for _, r in ipairs(rows) do
 			local name = r.name .. (r.open and " |cff66d966open|r" or "") .. (r.old and " |cff999999old version|r" or "")
 			tipPair(tt, name, r.where, TIP.white, r.same and TIP.green or (r.here and TIP.white or TIP.muted))
 		end
 	end
 	tt:AddLine(" ")
-	tipLine(tt, db and db.locked and "Click: shards here  ·  Right-click: unlock"
-		or "Drag: move  ·  Right-click: lock  ·  Click: shards here", TIP.muted)
+	tipLine(tt, hint or (db and db.locked and "Click: shards here  ·  Right-click: unlock"
+		or "Drag: move  ·  Right-click: lock  ·  Click: shards here"), TIP.muted)
 end
 ns.tooltip = tooltip
 
