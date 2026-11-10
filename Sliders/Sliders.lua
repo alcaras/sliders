@@ -783,7 +783,8 @@ local function tooltip(tt, hint)
 			or "None online. Friends show here once they run Sliders too.", TIP.muted)
 	else
 		for _, r in ipairs(rows) do
-			local name = r.name .. (r.open and " |cff66d966open|r" or "") .. (r.old and " |cff999999old version|r" or "")
+			local name = ns.classColored(r.name, r.class) .. (r.open and " |cff66d966open|r" or "")
+				.. (r.old and " |cff999999old version|r" or "")
 			tipPair(tt, name, r.where, TIP.white, r.same and TIP.green or (r.here and TIP.white or TIP.muted))
 		end
 	end
