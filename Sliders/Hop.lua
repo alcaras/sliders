@@ -33,7 +33,7 @@ local SPAM = {
 	tried = 120,         -- a host that did not work is skipped for 2 min
 	party = 5,           -- a party's size; a host never invites past it (no raid conversion)
 }
-local VERSION = "0.3"
+local VERSION = ns.VERSION   -- from the TOC (Sliders.lua)
 local RANK = { BN = 4, WHISPER = 3, GUILD = 2, CHANNEL = 1 }
 local ROUTE_NAME = { BN = "Battle.net", WHISPER = "whisper", GUILD = "guild", CHANNEL = "channel" }
 
@@ -117,6 +117,8 @@ local function isOpen(kind) return closedWhy(kind) == nil end
 local function statusFields(kind)
 	return ("%d;%s;%d;%d"):format(A.mapID() or 0, A.current() or "-", isOpen(kind) and 1 or 0, ns.crowd())
 end
+-- ST2;<map>;<shard>;<open>;<crowd>;<ask>;<version> (0.3.0-0.3.3 read the first five fields and ignore the version)
+local function st2(kind, ask) return ("ST2;%s;%d;%s"):format(statusFields(kind), ask and 1 or 0, VERSION) end
 
 -- ---------------------------------------------------------------- sending
 local function blocked() return L.InCombat() or A.lockdown() end
@@ -140,7 +142,7 @@ local function sendKind(kind, ask)
 	lastSent[kind] = now()
 	if kind == "direct" then
 		local n = 0
-		local msg = "ST2;" .. statusFields("direct") .. ";0"
+		local msg = st2("direct")
 		local friends = friendKeys()
 		for _, c in pairs(contacts) do
 			-- friends only (a stranger who whispered once gets no pushes), and only while they are online
@@ -151,11 +153,11 @@ local function sendKind(kind, ask)
 		end
 	elseif kind == "GUILD" then
 		if L.Read(IsInGuild) == true and hasGuildContact() then
-			ns.sendRoute("GUILD", "ST2;" .. statusFields("GUILD") .. ";" .. (ask and 1 or 0))
+			ns.sendRoute("GUILD", st2("GUILD", ask))
 		end
 	elseif kind == "CHANNEL" then
 		local ch = ns.channelID()
-		if ch then ns.sendRoute("CHANNEL", "ST2;" .. statusFields("CHANNEL") .. ";" .. (ask and 1 or 0), tostring(ch)) end
+		if ch then ns.sendRoute("CHANNEL", st2("CHANNEL", ask), tostring(ch)) end
 	end
 end
 
@@ -232,7 +234,8 @@ local function contactFrom(channel, sender, bnID)
 	return c, route
 end
 
-local function setStatus(c, route, map, shard, open, crowd)
+local function setStatus(c, route, map, shard, open, crowd, version)
+	if type(version) == "string" and version:match("^%d+%.%d+") then c.version = version end
 	local s = A.shardOf(shard)
 	local old = c.st
 	c.st = { map = tonumber(map), shard = s, open = open == "1", crowd = tonumber(crowd), t = now() }
@@ -249,7 +252,7 @@ local function answer(c, route, map)
 	if route == "BN" or route == "WHISPER" then
 		if now() - (c.replied or -1e9) < SPAM.reply or blocked() then return end
 		c.replied = now()
-		sendTo(c, "ST2;" .. statusFields("direct") .. ";0")
+		sendTo(c, st2("direct"))
 		return
 	end
 	if tonumber(map) ~= A.mapID() or answering[route] then return end
@@ -259,7 +262,7 @@ local function answer(c, route, map)
 		answering[route] = nil
 		if mine.cancelled or now() - (lastSent[route] or -1e9) < every(route) or blocked() then return end
 		lastSent[route] = now()
-		local msg = "ST2;" .. statusFields(route) .. ";0"
+		local msg = st2(route)
 		if route == "GUILD" then ns.sendRoute("GUILD", msg)
 		else local ch = ns.channelID() if ch then ns.sendRoute("CHANNEL", msg, tostring(ch)) end end
 	end, "answer")
@@ -335,6 +338,44 @@ end
 do
 	local add = ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter
 	if type(add) == "function" then pcall(add, "CHAT_MSG_SYSTEM", ns.quietFilter) end
+end
+
+-- ---------------------------------------------------------------- versions
+-- "0.3.10" > "0.3.4": numbers compared part by part
+local function newer(a, b)
+	local pa, pb = {}, {}
+	for n in tostring(a):gmatch("%d+") do pa[#pa + 1] = tonumber(n) end
+	for n in tostring(b):gmatch("%d+") do pb[#pb + 1] = tonumber(n) end
+	for i = 1, math.max(#pa, #pb) do
+		local x, y = pa[i] or 0, pb[i] or 0
+		if x ~= y then return x > y end
+	end
+	return false
+end
+ns.newerVersion = newer
+
+-- the highest version a friend runs, when it is newer than ours
+function ns.newestFriendVersion()
+	local best
+	for _, c in pairs(contacts) do
+		if c.version and newer(c.version, best or VERSION) then best = c.version end
+	end
+	return best
+end
+
+-- /sliders: one line per Sliders user heard from in the last 30 min (version, route, shard)
+function ns.contactLines()
+	local out = {}
+	for _, c in pairs(contacts) do
+		local st = c.st
+		if st and now() - st.t < SPAM.fresh then
+			out[#out + 1] = ("%s (Sliders %s, %s%s): %s%s."):format(c.name, c.version or "0.3.0-0.3.3", ROUTE_NAME[c.route],
+				c.friend and "" or ", not a friend", st.shard and A.label(st.shard, st.map) or "no shard yet",
+				st.open and ", open for invites" or "")
+		end
+	end
+	table.sort(out)
+	return out
 end
 
 -- ---------------------------------------------------------------- the guest's hop
@@ -570,10 +611,10 @@ ns.hooks.message = function(body, channel, sender, bnID)
 	if not c then return end
 	c.seen = now()
 	if v == "HI2" then
-		setStatus(c, route, f[3], f[4], f[5], f[6])
+		setStatus(c, route, f[3], f[4], f[5], f[6], f[2])
 		answer(c, route, f[3])
 	elseif v == "ST2" then
-		setStatus(c, route, f[2], f[3], f[4], f[5])
+		setStatus(c, route, f[2], f[3], f[4], f[5], f[7])
 		local mine = answering[route]
 		if mine and tonumber(f[2]) == A.mapID() and A.shardOf(f[3]) == mine.shard and (f[4] == "1" or not mine.open) then
 			mine.cancelled = true   -- someone already answered for our shard
@@ -656,8 +697,14 @@ end
 
 -- ---------------------------------------------------------------- UI (AlcPrices' look, its UI.lua S table: flat panel,
 -- Calibri, gold section labels, flat buttons in the action blue, the primary one filled)
+-- Built inside buildUI() under pcall: if any of it fails on a client, the minimap button and the slash commands below
+-- still work, and one line says what failed (Crow, 2026-11-09: no minimap button and no panel, his only addon).
+local uiError
+local function buildUI()
+-- Calibri only when AlcFont is loaded (its files exist then); friends without it get the game's own font. Every text
+-- starts from a game font object, so a font path the client refuses never leaves it without a font ("Font not set").
+local CALIBRI = C_AddOns and L.Read(C_AddOns.IsAddOnLoaded, "AlcFont") == true
 local FONT, FONT_BOLD = "Interface\\AddOns\\AlcFont\\Calibri.ttf", "Interface\\AddOns\\AlcFont\\CalibriBold.ttf"
-local FONT_FALLBACK = "Fonts\\ARIALN.TTF"   -- friends without AlcFont: Arial Narrow
 
 local function fill(f, c)
 	local t = f:CreateTexture(nil, "BACKGROUND")
@@ -667,8 +714,9 @@ local function fill(f, c)
 end
 
 local function text(parent, size, color, bold)
-	local fs = parent:CreateFontString(nil, "OVERLAY")
-	if not fs:SetFont(bold and FONT_BOLD or FONT, size, "") then fs:SetFont(FONT_FALLBACK, size, "") end
+	local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	local ok = CALIBRI and fs:SetFont(bold and FONT_BOLD or FONT, size, "")
+	if not ok then pcall(fs.SetFont, fs, STANDARD_TEXT_FONT, size, "") end
 	fs:SetTextColor(color[1], color[2], color[3])
 	fs:SetJustifyH("LEFT")
 	return fs
@@ -792,7 +840,7 @@ tinsert(UISpecialFrames, "SlidersPanel")   -- Escape closes it
 
 local eyebrow = text(panel, 10.5, C.gold, true)
 eyebrow:SetPoint("TOPLEFT", PAD, -14)
-eyebrow:SetText("SLIDERS · SHARDS HERE")
+eyebrow:SetText("SLIDERS " .. VERSION .. " · SHARDS HERE")
 local title = text(panel, 17, C.ink, true)
 title:SetPoint("TOPLEFT", PAD, -28)
 local sub = text(panel, 11, C.muted)
@@ -971,6 +1019,7 @@ function ns.RefreshPanel()
 			local who, strangers = {}, 0
 			for _, c in ipairs(e.people) do
 				if c.friend then who[#who + 1] = c.name .. (c.st.open and " (open)" or "")
+					.. ((c.version and c.version ~= VERSION) and (" (" .. c.version .. ")") or "")
 				else strangers = strangers + 1 end
 			end
 			if strangers > 0 then who[#who + 1] = strangers .. " more with Sliders" end
@@ -1016,7 +1065,9 @@ function ns.RefreshPanel()
 		hint:SetText(("Hop: asking %s to invite you to %s..."):format(hop.host.name, A.label(hop.shard)))
 		hint:SetTextColor(C.action[1], C.action[2], C.action[3])
 	else
-		hint:SetText(why and WHY_CLOSED[why] or "Hop asks a friend who is open for invites on that shard to invite you; "
+		local newest = ns.newestFriendVersion()
+		hint:SetText(newest and ("A friend runs Sliders %s (you have %s): github.com/alcaras/sliders/releases."):format(newest, VERSION)
+			or why and WHY_CLOSED[why] or "Hop asks a friend who is open for invites on that shard to invite you; "
 			.. "the server moves you, and Sliders leaves the group for you a few seconds later.")
 		hint:SetTextColor(C.muted[1], C.muted[2], C.muted[3])
 	end
@@ -1040,9 +1091,15 @@ function ns.TogglePanel()
 end
 L.Script(panel, "OnShow", function() ns.RefreshPanel() end, "panel")
 
+end   -- buildUI
+do
+	local ok, err = pcall(buildUI)
+	if not ok then uiError = tostring(err) end
+end
+
 -- ---------------------------------------------------------------- minimap button (LibDBIcon, embedded under Libs/)
 local function iconTooltip(tt)
-	tt:AddLine("Sliders")
+	tt:AddLine("Sliders " .. VERSION)
 	local cur = A.current()
 	tt:AddLine(cur and ("You are on " .. A.label(cur)) or "Shard not known yet", 1, 1, 1)
 	local mode = char and char.open or "off"
@@ -1059,7 +1116,7 @@ local function makeIcon()
 	if type(ns.db.minimap) ~= "table" then ns.db.minimap = { minimapPos = 215 } end
 	local obj = ldb:NewDataObject("Sliders", {
 		type = "launcher", text = "Sliders", icon = "Interface\\Icons\\spell_arcane_portalthunderbluff",
-		OnClick = L.Safe("minimap click", function() ns.TogglePanel() end),
+		OnClick = L.Safe("minimap click", function() if ns.TogglePanel then ns.TogglePanel() end end),
 		OnTooltipShow = L.Safe("minimap tooltip", iconTooltip),
 	})
 	if obj then dbi:Register("Sliders", obj, ns.db.minimap) end
@@ -1069,10 +1126,16 @@ local loadHook = ns.hooks.load
 ns.hooks.load = function()
 	loadHook()
 	makeIcon()
+	if uiError then
+		log("ui_error " .. uiError)
+		P("the Shards panel could not be built on this client: " .. uiError)
+	end
 end
 
 -- ---------------------------------------------------------------- slash
-ns.commands.shards = function() ns.TogglePanel() end
+ns.commands.shards = function()
+	if ns.TogglePanel then ns.TogglePanel() else P("the Shards panel is not available: " .. tostring(uiError)) end
+end
 ns.commands.open = function(arg)
 	if not char then return end
 	if arg == "solo" or arg == "group" or arg == "off" then char.open = arg

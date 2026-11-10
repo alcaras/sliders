@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.3). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.4). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
@@ -19,7 +19,7 @@ This is a test version (0.3.3). It was called Portage before; remove the old `Po
 - **How it knows:** every NPC's ID (its GUID, like `Creature-0-7074-1-9-3000-...`) names the server that spawned it:
   `7074` is the shard, `1` the continent. The number after that differs from player to player even on one shard,
   so Sliders ignores it.
-- **The Shards panel** (left-click the line, the minimap button, or `/sliders shards`): every shard known in your zone,
+- **The Shards panel** (left-click the line, the minimap button, or `/sliders shards`; `/sliders minimap` shows or hides the button): every shard known in your zone,
   who of your friends is on it, who is open for invites, how many players you saw there. **Hop** sits on every shard
   where someone is open.
 
@@ -58,7 +58,7 @@ And **when someone asks**: **Ask me** (a popup each time) or **Invite friends at
 
 ## Commands
 
-- `/sliders`: your shard, and the shards your friends reported.
+- `/sliders`: your shard, and every friend running Sliders: their version and shard. `/sliders version`: yours.
 - `/sliders shards`: the panel. `/sliders hop 7074`: hop to that shard of your zone.
 - `/sliders open off | solo | group`, `/sliders invite ask | auto`.
 - `/sliders lock` / `unlock`, `/sliders hide` / `show`: the shard line. `/sliders minimap`: the minimap button.
