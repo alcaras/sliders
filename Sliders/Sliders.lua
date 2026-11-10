@@ -779,7 +779,8 @@ local function tooltip(tt, hint)
 	tt:AddLine(" ")
 	tipLine(tt, "Friends with Sliders", TIP.gold)
 	if #rows == 0 then
-		tipLine(tt, "None online. Friends show here once they run Sliders too.", TIP.muted)
+		tipLine(tt, ns.asking and ns.asking() and "Asking your friends..."
+			or "None online. Friends show here once they run Sliders too.", TIP.muted)
 	else
 		for _, r in ipairs(rows) do
 			local name = r.name .. (r.open and " |cff66d966open|r" or "") .. (r.old and " |cff999999old version|r" or "")
@@ -976,6 +977,5 @@ commands = {
 }
 ns.commands = commands
 SlashCmdList.SLIDERS = L.Slash(commands, "/sliders: your shard | /sliders shards: the shards here, with Hop | /sliders open"
-	.. " off | solo | group | /sliders invite ask | auto | /sliders hop <server> | /sliders ping [name] | /sliders log [n]"
-	.. " | /sliders after stay | leave | /sliders version | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders"
-	.. " strangers on | off | /sliders minimap", P)
+	.. " off | solo | group | /sliders invite ask | friends | anyone | /sliders hop <server> | /sliders ping [name] | /sliders log [n]"
+	.. " | /sliders version | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders minimap", P)
