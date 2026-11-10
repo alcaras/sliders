@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Sliders
 ## Notes: Which shard of the server you and your friends are on, and one click to hop to another. /sliders
-## Version: 0.3.4
+## Version: 0.3.5
 ## Author: Dominik
 ## AllowLoadGameType: camelot
 ## SavedVariables: SlidersDB

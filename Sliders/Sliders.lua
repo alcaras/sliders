@@ -742,12 +742,55 @@ local function statusLines()
 	return out
 end
 
+-- the tooltip: a few short lines in Blizzard's tooltip layout (alcaras: "tooltip is really bad / hard to read"); the
+-- read counts and the full lists stay in /sliders
+local TIP = { gold = { 1, 0.82, 0 }, white = { 1, 1, 1 }, muted = { 0.6, 0.6, 0.6 }, green = { 0.4, 0.85, 0.4 },
+	warn = { 1, 0.6, 0.2 } }
+local function tipLine(tt, text, c) tt:AddLine(text, c[1], c[2], c[3], true) end
+local function tipPair(tt, left, right, lc, rc) tt:AddDoubleLine(left, right, lc[1], lc[2], lc[3], rc[1], rc[2], rc[3]) end
+
+local function tooltip(tt)
+	tipPair(tt, "Sliders", ns.VERSION, TIP.gold, TIP.muted)
+	local why = paused()
+	local key = current or tentative
+	if loading then
+		tipLine(tt, "Loading...", TIP.muted)
+	elseif why then
+		tipLine(tt, why == "taxi" and "Paused on a flight: shards are not read there."
+			or "Paused in an instance: shards are not read there.", TIP.muted)
+	elseif not key then
+		tipLine(tt, "No shard yet: target an NPC or move the mouse over one.", TIP.white)
+	else
+		local state, c
+		if current and not stale() then state, c = "confirmed", TIP.green
+		elseif current then state, c = "no NPC for " .. age(now() - (lastRead or now())), TIP.muted
+		else state, c = "reading NPCs...", TIP.muted end
+		tipPair(tt, shownLabel(key), state, TIP.white, c)
+		tipLine(tt, ("%d players seen in the last 5 min"):format(ns.crowd()), TIP.muted)
+	end
+	if inGroup() then
+		checkParty("asked")
+		if #offShard == 0 then tipLine(tt, "Party: everyone on the party's shard", TIP.muted)
+		else tipLine(tt, "Party: not on the party's shard: " .. table.concat(offShard, ", "), TIP.warn) end
+	end
+	local rows = ns.friendRows and ns.friendRows() or {}
+	if #rows > 0 then
+		tt:AddLine(" ")
+		tipLine(tt, "Friends with Sliders", TIP.gold)
+		for _, r in ipairs(rows) do
+			local name = r.name .. (r.open and " |cff66d966open|r" or "") .. (r.old and " |cff999999old version|r" or "")
+			tipPair(tt, name, r.where, TIP.white, r.same and TIP.green or (r.here and TIP.white or TIP.muted))
+		end
+	end
+	tt:AddLine(" ")
+	tipLine(tt, db and db.locked and "Click: shards here  ·  Right-click: unlock"
+		or "Drag: move  ·  Right-click: lock  ·  Click: shards here", TIP.muted)
+end
+ns.tooltip = tooltip
+
 L.Script(frame, "OnEnter", function(self)
 	GameTooltip:SetOwner(self, "ANCHOR_BOTTOMLEFT")
-	GameTooltip:AddLine("Sliders " .. ns.VERSION)
-	for _, line in ipairs(statusLines()) do GameTooltip:AddLine(line, 1, 1, 1, true) end
-	GameTooltip:AddLine(db and db.locked and "Click: the shards here. Right-click: unlock to move it."
-		or "Drag: move it. Right-click: lock it here. Click: the shards here.", 0.6, 0.6, 0.6, true)
+	tooltip(GameTooltip)
 	GameTooltip:Show()
 end, "tooltip")
 L.Script(frame, "OnLeave", function() GameTooltip:Hide() end, "tooltip")

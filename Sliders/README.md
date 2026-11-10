@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.4). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.5). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 

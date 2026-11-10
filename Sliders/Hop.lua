@@ -363,16 +363,47 @@ function ns.newestFriendVersion()
 	return best
 end
 
+-- one entry per character name heard from in the last 30 min (a friend heard by Battle.net and by guild is one
+-- person), the freshest status kept; friendsOnly: Battle.net, character friends and guild
+local function people(friendsOnly)
+	local byName = {}
+	for _, c in pairs(contacts) do
+		local st = c.st
+		if st and now() - st.t < SPAM.fresh and (c.friend or not friendsOnly) then
+			local k = c.name:lower()
+			local old = byName[k]
+			if not old or st.t > old.st.t or (c.friend and not old.friend) then byName[k] = c end
+		end
+	end
+	return byName
+end
+
+-- the tooltip's friends: your shard first, then your zone, then the rest; each with where they are
+function ns.friendRows()
+	local cur, map = A.current(), A.mapID()
+	local rows = {}
+	for _, c in pairs(people(true)) do
+		local st = c.st
+		rows[#rows + 1] = { name = c.name, where = st.shard and A.label(st.shard, st.map) or "no shard yet",
+			same = st.shard ~= nil and st.shard == cur and st.map == map, here = st.map == map, open = st.open,
+			old = c.version == nil or newer(VERSION, c.version) }
+	end
+	table.sort(rows, function(a, b)
+		if a.same ~= b.same then return a.same end
+		if a.here ~= b.here then return a.here end
+		return a.name < b.name
+	end)
+	return rows
+end
+
 -- /sliders: one line per Sliders user heard from in the last 30 min (version, route, shard)
 function ns.contactLines()
 	local out = {}
-	for _, c in pairs(contacts) do
+	for _, c in pairs(people(false)) do
 		local st = c.st
-		if st and now() - st.t < SPAM.fresh then
-			out[#out + 1] = ("%s (Sliders %s, %s%s): %s%s."):format(c.name, c.version or "0.3.0-0.3.3", ROUTE_NAME[c.route],
-				c.friend and "" or ", not a friend", st.shard and A.label(st.shard, st.map) or "no shard yet",
-				st.open and ", open for invites" or "")
-		end
+		out[#out + 1] = ("%s: %s%s (Sliders %s, by %s%s)."):format(c.name, st.shard and A.label(st.shard, st.map) or "no shard yet",
+			st.open and ", open for invites" or "", c.version or "0.3.0-0.3.3", ROUTE_NAME[c.route],
+			c.friend and "" or ", not a friend")
 	end
 	table.sort(out)
 	return out
@@ -704,7 +735,7 @@ local function buildUI()
 -- Calibri only when AlcFont is loaded (its files exist then); friends without it get the game's own font. Every text
 -- starts from a game font object, so a font path the client refuses never leaves it without a font ("Font not set").
 local CALIBRI = C_AddOns and L.Read(C_AddOns.IsAddOnLoaded, "AlcFont") == true
-local FONT, FONT_BOLD = "Interface\\AddOns\\AlcFont\\Calibri.ttf", "Interface\\AddOns\\AlcFont\\CalibriBold.ttf"
+local FONT, FONT_BOLD = "Interface\\AddOns\\AlcFont\\Calibri.ttf", "Interface\\AddOns\\AlcFont\\CalibriBold.ttf"   -- standalone-ok: used only when CALIBRI (AlcFont loaded)
 
 local function fill(f, c)
 	local t = f:CreateTexture(nil, "BACKGROUND")
