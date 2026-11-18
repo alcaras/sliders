@@ -7,7 +7,7 @@ shard of your zone with one click, when a friend there is open for invites.
 It is quiet: nothing in chat unless you ask, and it never invites anyone or joins a group unless you clicked for it
 (or you switched on "open for invites").
 
-This is a test version (0.3.8). It was called Portage before; remove the old `Portage` folder.
+This is a test version (0.3.9). It was called Portage before; remove the old `Portage` folder.
 
 ## What it shows
 
@@ -19,9 +19,12 @@ This is a test version (0.3.8). It was called Portage before; remove the old `Po
 - **How it knows:** every NPC's ID (its GUID, like `Creature-0-7074-1-9-3000-...`) names the server that spawned it:
   `7074` is the shard, `1` the continent. The number after that differs from player to player even on one shard,
   so Sliders ignores it.
-- **The Shards panel** (left-click the line, the minimap button, or `/sliders shards`; `/sliders minimap` shows or hides the button): every shard known in your zone,
-  who of your friends is on it, who is open for invites, how many players you saw there. **Hop** sits on every shard
-  where someone is open.
+- **The Shards panel** (left-click the line, the minimap button, or `/sliders shards`; `/sliders minimap` shows or
+  hides the button), one line per person and per shard. First: your **Battle.net friends, friends and guild members
+  online in your zone**, whether or not they run Sliders (their shard number when they do, "?" when not), each with
+  **Ask** (or **Hop** when they run Sliders and are open). Then every shard known in your zone: when you were there,
+  who of your friends is on it, **Hop** where someone is open. A status line on top says how your last hop went.
+  Hover anything for details. The gear (or `/sliders settings`) opens the settings beside it.
 
 ## Hopping
 
@@ -41,9 +44,14 @@ you, the host and the host's party members who run Sliders. Nothing else in chat
 
 You must be out of a group, out of combat, and in the open world to hop.
 
+**Ask** (friends and guild in your zone without Sliders): one click whispers them "Hi! Could you invite me to your
+group for a moment? I'd like to hop onto your shard." Sliders accepts their invite (only theirs, for 2 minutes), the
+server moves you, and you stay in their group. Nothing is whispered without your click; `/sliders asktext <text>`
+changes the words, `/sliders asktext reset` brings them back.
+
 ## Open for invites (off by default)
 
-In the panel, or `/sliders open`:
+In the settings (the panel's gear), or `/sliders open`:
 
 - **Off**: nobody can ask you.
 - **When solo**: friends can ask while you are alone.
@@ -59,7 +67,7 @@ reach you through the public channel (off by default) or a whisper.
 ## Commands
 
 - `/sliders`: your shard, and every friend running Sliders: their version and shard. `/sliders version`: yours.
-- `/sliders shards`: the panel. `/sliders hop 7074`: hop to that shard of your zone.
+- `/sliders shards`: the panel; `/sliders settings`: its settings. `/sliders hop 7074`: hop to that shard of your zone.
 - `/sliders open off | solo | group`, `/sliders invite ask | friends | anyone`.
 - `/sliders lock` / `unlock`, `/sliders hide` / `show`: the shard line. `/sliders minimap`: the minimap button.
 - `/sliders chat on | off`: the automatic chat lines ("your shard changed", "a shard move is coming"), off by default.

@@ -31,6 +31,7 @@ local SPAM = {
 	perRequester = 120,  -- a host considers one request per requester per 2 min
 	autoInvites = 5, autoWindow = 600,   -- an auto-inviting host: at most 5 invites per 10 min
 	answerTimeout = 20, inviteTimeout = 60, moveTimeout = 120,
+	askTimeout = 120,    -- a whispered Ask: a person has to read it and invite
 	fresh = 1800,        -- a channel stranger's status older than 30 min is not shown
 	guildFresh = 7200,   -- a guild member's: 2 h (their online state is not read here)
 	tried = 120,         -- a host that did not work is skipped for 2 min
@@ -248,7 +249,12 @@ local function contactFrom(channel, sender, bnID)
 	if not key or key == ownKey() then return nil end
 	local c = contacts[key]
 	if not c then
-		c = { key = key, name = first(full), full = full, route = route, target = target }
+		-- the same character by another route (Battle.net spells the realm its own way): one contact, the best route
+		local id = A.ident(full)
+		for _, o in pairs(contacts) do if id and A.ident(o.full) == id then c = o break end end
+	end
+	if not c then
+		c = { key = key, name = A.shortName(full), full = full, route = route, target = target }
 		contacts[key] = c
 	elseif RANK[route] > RANK[c.route] then
 		c.route, c.target = route, target
@@ -279,7 +285,8 @@ function ns.restoreContacts()
 	local db = ns.db
 	if not db or type(db.contacts) ~= "table" then return end
 	local ids = {}
-	for _, f in ipairs(A.bnFriends()) do ids[f.name:lower()] = f.id end
+	-- by the whole name, and by the first name for records saved before 0.3.9 (they kept only "Crow")
+	for _, f in ipairs(A.bnFriends()) do ids[A.shortName(f.name):lower()] = f.id ids[first(f.name):lower()] = f.id end
 	local t = A.stamp()
 	for key, r in pairs(db.contacts) do
 		if type(r) ~= "table" or t - (r.at or 0) > KEEP_CONTACTS then
@@ -288,7 +295,7 @@ function ns.restoreContacts()
 			local target = r.route == "WHISPER" and r.full or nil
 			if r.route == "BN" then target = ids[(r.name or ""):lower()] end
 			if r.route ~= "BN" or target then
-				contacts[key] = { key = key, name = r.name, full = r.full, route = r.route, target = target, friend = r.friend,
+				contacts[key] = { key = key, name = r.full and A.shortName(r.full) or r.name, full = r.full, route = r.route, target = target, friend = r.friend,
 					guild = r.guild, version = r.version, class = r.class, restored = true,
 					st = { map = r.map, shard = r.shard, open = r.open, crowd = r.crowd, t = now() - (t - (r.at or t)) } }
 			end
@@ -507,6 +514,7 @@ local function endHop(text, ok, stay)
 		(h.tInvite and h.tMove) and (math.floor(h.tMove - h.tInvite) .. "s") or "-", h.countdown or "no",
 		h.transfer and "yes" or "no"))
 	P(text)
+	ns.lastResult = { text = text, ok = ok, t = now() }
 	if ns.RefreshPanel then ns.RefreshPanel() end
 end
 
@@ -553,6 +561,164 @@ function ns.Hop(shard)
 	end, "hop")
 end
 
+-- ---------------------------------------------------------------- people in your zone (with or without Sliders)
+-- Early on few friends run Sliders (alcaras, 2026-11-14: "make it easy to see if anyone in your guild or friends is in
+-- the same zone and make it easy to ask them to invite you"). Battle.net friends (areaName), character friends (area)
+-- and the guild (Communities: C_Club member info's zone) online in your zone, one entry per character; their shard
+-- when they run Sliders, else unknown. Read when the panel draws, at most every 5 s.
+local ASK_TEXT = "Hi! Could you invite me to your group for a moment? I'd like to hop onto your shard."
+local mates, matesAt = nil, -100
+local classByName                -- localized class name -> class file (character friends give the localized name)
+
+local function classFromLocalized(name)
+	if not classByName then
+		classByName = {}
+		for _, t in ipairs({ LOCALIZED_CLASS_NAMES_MALE or {}, LOCALIZED_CLASS_NAMES_FEMALE or {} }) do
+			for file, loc in pairs(t) do if type(loc) == "string" then classByName[loc] = file end end
+		end
+	end
+	return name and classByName[name] or nil
+end
+
+local function classFromID(id)
+	local info = id and C_CreatureInfo and L.Read(C_CreatureInfo.GetClassInfo, id)
+	local file = type(info) == "table" and L.Value(info.classFile)
+	return type(file) == "string" and file or nil
+end
+
+local function zoneNames()
+	local here = {}
+	local a = A.mapName(A.mapID())
+	if type(a) == "string" then here[a:lower()] = true end
+	local b = L.Value(L.Read(GetZoneText))
+	if type(b) == "string" and b ~= "" then here[b:lower()] = true end
+	return here
+end
+
+function ns.ZoneMates(force)
+	if mates and not force and now() - matesAt < 5 then return mates end
+	local here, me, out, seen = zoneNames(), ownKey(), {}, {}
+	-- us by our whole name (UnitName gives the first name and the surname apart; the lists give "First Surname")
+	local _, myFirst, mySur = pcall(UnitName, "player")
+	myFirst, mySur = L.Value(myFirst), L.Value(mySur)
+	local myId = type(myFirst) == "string" and A.ident(myFirst .. (type(mySur) == "string" and mySur ~= "" and (" " .. mySur) or "")
+		.. "-" .. realm()) or A.ident(A.ownFull())
+	local byId = {}   -- contacts by identity: Battle.net and the guild name one character with different realms
+	for _, c in pairs(contacts) do local id = A.ident(c.full) if id then byId[id] = byId[id] or c end end
+	local function inZone(z) z = L.Value(z) return type(z) == "string" and here[z:lower()] == true end
+	local function add(p)
+		local key, id = norm(p.full), A.ident(p.full)
+		if not key or key == me or id == myId then return end
+		-- one row per character: a Battle.net friend who is also in the guild is "BN · guild"
+		local had = seen[id]
+		if had then
+			had.sources[#had.sources + 1] = p.source
+			had.class = had.class or p.class
+			return
+		end
+		seen[id] = p
+		p.key, p.name, p.sources = key, A.shortName(p.full), { p.source }
+		local c = contacts[key] or byId[id]
+		if c and c.st and current(c) and c.st.map == A.mapID() then
+			p.sliders, p.shard, p.open, p.class, p.version = true, c.st.shard, c.st.open, p.class or c.class, c.version
+		end
+		out[#out + 1] = p
+	end
+	-- Battle.net friends playing Forever
+	local same = FriendsListUtil and FriendsListUtil.IsPlayingSameWoWProject
+	for i = 1, math.min(L.Num(L.Read(BNGetNumFriends)) or 0, 200) do
+		local acc = C_BattleNet and L.Read(C_BattleNet.GetFriendAccountInfo, i)
+		local g = type(acc) == "table" and acc.gameAccountInfo
+		if type(g) == "table" and L.Value(g.isOnline) == true and (not same or L.Read(same, g) == true) and inZone(g.areaName) then
+			local name, r = L.Value(g.characterName), L.Value(g.realmName)
+			if type(name) == "string" and name ~= "" then
+				add({ full = name .. "-" .. (type(r) == "string" and r ~= "" and r or realm()), source = "Battle.net friend",
+					class = L.Value(g.classFilename), bnet = L.Num(acc.bnetAccountID) })
+			end
+		end
+	end
+	-- character friends
+	for i = 1, math.min(C_FriendList and L.Num(L.Read(C_FriendList.GetNumFriends)) or 0, 100) do
+		local f = L.Read(C_FriendList.GetFriendInfoByIndex, i)
+		local name = type(f) == "table" and L.Value(f.name)
+		if type(name) == "string" and L.Value(f.connected) == true and inZone(f.area) then
+			add({ full = name, source = "friend", class = classFromLocalized(L.Value(f.className)) })
+		end
+	end
+	-- the guild (Communities)
+	local club = C_Club and L.Read(C_Club.GetGuildClubId)
+	if club then
+		local members = L.Read(C_Club.GetClubMembers, club)
+		local P_ = Enum and Enum.ClubMemberPresence or {}
+		local offline = { [P_.Offline or 3] = true, [P_.OnlineMobile or 2] = true, [P_.Unknown or 0] = true }
+		for i, id in ipairs(type(members) == "table" and members or {}) do
+			if i > 1000 then break end
+			local info = L.Read(C_Club.GetMemberInfo, club, id)
+			if type(info) == "table" and L.Value(info.isSelf) ~= true and not offline[L.Num(info.presence) or 0]
+				and inZone(info.zone) then
+				local name = L.Value(info.name)
+				if type(name) == "string" and name ~= "" then
+					add({ full = name, source = "guild", class = classFromID(L.Num(info.classID)) })
+				end
+			end
+		end
+	end
+	table.sort(out, function(a, b)
+		if (a.open or false) ~= (b.open or false) then return a.open == true end
+		if (a.sliders or false) ~= (b.sliders or false) then return a.sliders == true end
+		return a.name < b.name
+	end)
+	mates, matesAt = out, now()
+	return out
+end
+function ns.ForgetZoneMates() mates = nil end
+
+-- the whisper an Ask sends: plain, from the user's own click; /sliders asktext changes it
+function ns.AskText()
+	local db = ns.db
+	-- no mention of Sliders (alcaras: "no sliders adv")
+	return db and type(db.askText) == "string" and db.askText ~= "" and db.askText or ASK_TEXT
+end
+
+local askedAt = {}   -- person key -> now() of the last Ask
+-- one click: whisper a friend or guild member in your zone (no Sliders needed on their side) to invite you; their
+-- invite is accepted (only theirs, within 2 min), the server moves you, you stay in their group
+function ns.Ask(p)
+	if not char or type(p) ~= "table" then return end
+	local why
+	if hop then why = "a hop is already running."
+	elseif now() - lastHop < SPAM.hopEvery then why = "one hop per 10 seconds."
+	elseif now() - (askedAt[p.key] or -1e9) < SPAM.perRequester then why = ("you asked %s a moment ago."):format(p.name)
+	elseif A.inGroup() then why = "leave your group first: a hop works by invite."
+	elseif L.InCombat() then why = "not in combat."
+	elseif A.instanced() or A.paused() then why = "not here: shards are read in the open world only."
+	elseif A.lockdown() then why = "chat is locked right now (a boss fight or a rated match)."
+	elseif p.shard and p.shard == A.current() then why = ("%s is on your shard already."):format(p.name)
+	end
+	if why then P(why) return end
+	local text = ns.AskText()
+	local ok
+	if p.bnet and C_BattleNet and C_BattleNet.SendWhisper then
+		ok = pcall(C_BattleNet.SendWhisper, p.bnet, text)
+	elseif C_ChatInfo and C_ChatInfo.SendChatMessage then
+		ok = pcall(C_ChatInfo.SendChatMessage, text, "WHISPER", nil, p.full)
+	end
+	log(("ask_sent %s (%s, %s): %s"):format(p.name, p.source or "?", p.sliders and "Sliders" or "no Sliders",
+		ok and "ok" or "failed"))
+	if not ok then P(("could not whisper %s."):format(p.name)) return end
+	askedAt[p.key] = now()
+	local req = "ask" .. ("%d"):format(A.stamp() % 100000)
+	hop = { req = req, host = { key = p.key, name = p.name, full = p.full, route = "ASK", noSliders = true },
+		shard = p.shard, from = A.current(), map = A.mapID(), t = now(), phase = "invited", ask = true }
+	quiet(p.name)
+	P(("asked %s to invite you; Sliders accepts their invite."):format(p.name))
+	if ns.RefreshPanel then ns.RefreshPanel() end
+	local h = hop
+	L.After(SPAM.askTimeout, function()
+		if hop == h and h.phase == "invited" then endHop(("no invite from %s."):format(p.name), false) end
+	end, "hop")
+end
+
 local WHY = { closed = "is not open for invites", busy = "is busy", moved = "is not on that shard any more",
 	full = "has no room in the group", declined = "said no", combat = "is in combat" }
 
@@ -572,11 +738,79 @@ local function onHostAnswer(v, req, a)
 	end, "hop")
 end
 
+-- the same character in two spellings (with or without the realm, Battle.net's realm, a first name alone)
+local function sameChar(a, b)
+	if type(a) ~= "string" or type(b) ~= "string" then return false end
+	local ia, ib = A.ident(a), A.ident(b)
+	return (ia ~= nil and ia == ib) or first(a):lower() == first(b):lower()
+end
+
+-- An Ask to someone in a group who does not lead it: their invite becomes a suggestion to the leader, the game says so
+-- ("Val Aran suggested that Stevie Bones invite you to their group.", ERR_INFORM_SUGGEST_INVITE_SS; the leader
+-- unnamed: ERR_INFORM_SUGGEST_INVITE_S), and the leader's invite follows (alcaras, Un'Goro 2026-11-16: Sliders kept
+-- waiting for Val Aran's own invite). PARTY_INVITE_REQUEST has no suggest flag, so the system line names the leader.
+local suggestPatterns
+function ns.onSystemMessage(msg)
+	if not (hop and hop.ask and hop.phase == "invited") then return end
+	msg = L.Value(msg)
+	if type(msg) ~= "string" then return end
+	if not suggestPatterns then
+		-- from the client's own strings (any locale); "%1$s ... %2$s" may come in the other order in a translation, so
+		-- each capture is put back at its argument's place
+		suggestPatterns = {}
+		for _, k in ipairs({ "ERR_INFORM_SUGGEST_INVITE_SS", "ERR_INFORM_SUGGEST_INVITE_S" }) do
+			local fmt = _G[k]
+			if type(fmt) == "string" and fmt ~= "" then
+				local order, n = {}, 0
+				for spec in plainText(fmt):gmatch("%%(%d*)%$?s") do
+					n = n + 1
+					order[n] = tonumber(spec) or n
+				end
+				suggestPatterns[#suggestPatterns + 1] = { pattern = toPattern(fmt), order = order }
+			end
+		end
+	end
+	msg = plainText(msg)
+	for _, sp in ipairs(suggestPatterns) do
+		local caps, args = { msg:match(sp.pattern) }, {}
+		for i, v in ipairs(caps) do args[sp.order[i] or i] = v end
+		local who, leader = args[1], args[2]
+		if who and sameChar(who, hop.host.full) then
+			hop.leader = leader and A.shortName(leader) or true   -- true: their leader, unnamed
+			if ns.RefreshPanel then ns.RefreshPanel() end
+			log(("ask_suggested %s: %s asked %s"):format(hop.req, hop.host.name, tostring(leader or "their leader")))
+			return
+		end
+	end
+end
+L.On("CHAT_MSG_SYSTEM", function(_, msg) ns.onSystemMessage(msg) end, "suggest")
+
+-- an Ask's invite from someone other than the asked person: their group's leader (named by the suggest line); with
+-- the leader unnamed, a friend or guildmate in this zone not known to be elsewhere; without a suggest line, a friend or
+-- guildmate known (Sliders) to be on the shard asked for. Anyone else's invite stays with Blizzard's popup, and a join
+-- by hand still ends the wait (ns.hooks.joined).
+local function askInviter(name)
+	if not hop.ask or type(name) ~= "string" then return false end
+	if type(hop.leader) == "string" then return sameChar(name, hop.leader) end
+	for _, p in ipairs(ns.ZoneMates(true)) do
+		if sameChar(name, p.full) then
+			if hop.leader == true then return p.shard == nil or hop.shard == nil or p.shard == hop.shard end
+			return p.shard ~= nil and p.shard == hop.shard
+		end
+	end
+	return false
+end
+
 ns.hooks.invite = function(name, inviterGUID)
 	if not hop or (hop.phase ~= "asked" and hop.phase ~= "invited") then return end
 	local match
 	if hop.hostGUID and hop.hostGUID ~= "" then match = inviterGUID == hop.hostGUID
-	else match = norm(name) == hop.host.key end
+	else match = norm(name) == hop.host.key or (A.ident(name) ~= nil and A.ident(name) == A.ident(hop.host.full)) end
+	if not match and askInviter(name) then
+		match = true
+		hop.inviter = A.shortName(name)
+	end
+	if type(name) == "string" then hop.seenInvite = A.shortName(name) end
 	if not match then return end   -- any other invite stays with Blizzard's popup
 	hop.phase, hop.tInvite = "accepting", now()
 	local h = hop
@@ -588,7 +822,7 @@ ns.hooks.invite = function(name, inviterGUID)
 	-- character stops trying (char.manualAccept)
 	if char.manualAccept then
 		log(("hop_invite %s from %s: waiting for Accept"):format(hop.req, tostring(name)))
-		P(("%s invited you: click Accept on the invite."):format(hop.host.name))
+		P(("%s invited you: click Accept on the invite."):format(hop.inviter or hop.host.name))
 		return
 	end
 	log(("hop_accept %s from %s"):format(hop.req, tostring(name)))
@@ -605,12 +839,24 @@ end, "blocked")
 
 ns.hooks.joined = function()
 	if hosting then hosting.joined = true end
+	-- an Ask still waiting, and the user joined a group by hand (an invite Sliders did not take as theirs): that is the
+	-- hop's group, whoever invited; never left by Sliders (the user chose it)
+	if hop and hop.ask and hop.phase == "invited" then
+		hop.phase, hop.tInvite, hop.byHand = "accepting", now(), true
+		hop.inviter = hop.inviter or hop.seenInvite
+		log(("hop_joined_by_hand %s via %s"):format(hop.req, tostring(hop.inviter)))
+	end
 	if not hop or hop.phase ~= "accepting" then return end
 	hop.phase = "joined"
 	pcall(StaticPopup_Hide, "PARTY_INVITE")   -- joined: Blizzard's invite popup, if still up, has nothing left to do
 	local h = hop
 	L.After(SPAM.moveTimeout, function()
 		if hop ~= h or hop.phase ~= "joined" then return end
+		if h.byHand then
+			endHop(h.transfer and "moved, but Sliders could not read the new shard yet." or "no move after 2 minutes.",
+				h.transfer == true, true)
+			return
+		end
 		endHop(h.transfer and "moved, but Sliders could not read the new shard yet; left the group."
 			or "no move after 2 minutes; left the group.", h.transfer == true)
 	end, "hop")
@@ -728,11 +974,14 @@ ns.hooks.key = function(key)
 	if hop and (hop.phase == "joined" or hop.phase == "accepting" or hop.phase == "moved") and key ~= hop.from then
 		hop.tMove = hop.tMove or now()
 		local cr = hop.host.name
-		sendTo(hop.host, ("DONE2;%s;%s;%s"):format(hop.host.key, hop.req, key))
+		if not hop.host.noSliders then sendTo(hop.host, ("DONE2;%s;%s;%s"):format(hop.host.key, hop.req, key)) end
 		local stay = A.inGroup()
-		local where = key == hop.shard and ("moved to %s via %s."):format(A.label(key), cr)
+		-- invited by their group's leader: "via Val Aran (Stevie Bones invited)", the group is Stevie Bones'
+		local by = (hop.inviter and not sameChar(hop.inviter, hop.host.full)) and hop.inviter or nil
+		local via = cr .. (by and (" (%s invited)"):format(by) or "")
+		local where = (key == hop.shard or hop.shard == nil) and ("moved to %s via %s."):format(A.label(key), via)
 			or ("moved to %s (not %s's shard)."):format(A.label(key), cr)
-		endHop(stay and (where .. (" You stay in %s's group: leaving may move you back."):format(cr)) or where, true, stay)
+		endHop(stay and (where .. (" You stay in %s's group: leaving may move you back."):format(by or cr)) or where, true, stay)
 	end
 	-- friends whose hello came before our shard was known get their answer now
 	for _, c in pairs(contacts) do
@@ -782,6 +1031,18 @@ ns.hooks.world = function()
 	refreshOpen()
 end
 
+local matesQueued = false
+local function matesChanged()
+	ns.ForgetZoneMates()
+	if matesQueued or not ns.RefreshPanel then return end
+	matesQueued = true
+	L.After(1, function() matesQueued = false if ns.RefreshPanel then ns.RefreshPanel() end end, "mates")
+end
+L.On("GUILD_ROSTER_UPDATE", matesChanged, "mates")
+L.On("FRIENDLIST_UPDATE", matesChanged, "mates")
+L.On("BN_FRIEND_INFO_CHANGED", matesChanged, "mates")
+L.On("ZONE_CHANGED_NEW_AREA", matesChanged, "mates")
+
 L.On("PLAYER_FLAGS_CHANGED", function(_, unit)
 	if L.Value(unit) == "player" then refreshOpen() end
 end, "afk")
@@ -794,6 +1055,7 @@ ns.hooks.load = function()
 	if char.invite == "auto" then char.invite = "friends" end   -- 0.3.0-0.3.6's "Invite friends at once"
 	if char.invite ~= "friends" and char.invite ~= "anyone" then char.invite = "ask" end
 	char.afterHop, char.strangers = nil, nil   -- settings of 0.3.0-0.3.6 that are gone
+	if ns.db then ns.db.askPlug = nil end      -- an unreleased switch: the Ask whisper never mentions Sliders
 end
 
 -- ---------------------------------------------------------------- UI (AlcPrices' look, its UI.lua S table: flat panel,
@@ -931,119 +1193,360 @@ end
 ns.popup, ns.refreshButton, ns.ownKey = popup, refreshButton, ownKey
 function ns.isHosting() return hosting ~= nil end
 
--- the Shards panel: one row per shard known in this zone; it sizes itself to what it shows
-local W, ROWS, ROWH, PAD = 460, 7, 42, 16
-local panel = card("SlidersPanel", W, 300)
+-- the Shards panel (2026-11-14; alcaras: "very spaced out. look at huddle", "tufte", "think about cuj user journeys";
+-- then "settings should be another window, not a toggle for the window we're on"). Built for the journeys in NOTES.md:
+-- (1) who of my friends and guild is in this zone, one click Ask; (2) someone asks me (the popup above); (3) did it
+-- work (the status line, the shard in the title); (4) rarely, the settings: their own small window beside the panel
+-- (the gear, or /sliders settings). Huddle's density: one 18 px line per person and per shard, columns, no boxed rows,
+-- no repeated labels, a faint stripe on every other line; a long list scrolls with the wheel. Green = your shard,
+-- everywhere. Every action word says on hover what it does, or why it can't right now; every line has a tooltip.
+-- full names ("Crow Blackfeather", 2026-11-14) need the wider name column; a name too long still ends in "..." and
+-- the line's tooltip has it whole; the source column fits "BN · guild"
+local PL = { width = 360, pad = 10, row = 18, head = 16, people = 12, shards = 6, gap = 8, thumb = 2, top = 28,
+	nameW = 168, srcW = 56, shardW = 44, whenW = 48, actW = 40, actH = 15, setWidth = 320 }
+local panel = card("SlidersPanel", PL.width, 200)
 panel:SetPoint("TOP", UIParent, "TOP", 0, -170)
 L.Movable(panel, function(pos) if ns.db then ns.db.panelPos = pos end end)
 panel:SetClampedToScreen(true)
-tinsert(UISpecialFrames, "SlidersPanel")   -- Escape closes it
+tinsert(UISpecialFrames, "SlidersPanel")   -- Escape closes it (and the settings with it)
 
-local eyebrow = text(panel, 10.5, C.gold, true)
-eyebrow:SetPoint("TOPLEFT", PAD, -14)
-eyebrow:SetText("SLIDERS " .. VERSION .. " · SHARDS HERE")
-local title = text(panel, 17, C.ink, true)
-title:SetPoint("TOPLEFT", PAD, -28)
-local sub = text(panel, 11, C.muted)
-sub:SetPoint("TOPLEFT", PAD, -54)
-sub:SetWidth(W - 2 * PAD - 30)
-
-local close = CreateFrame("Button", nil, panel)
-close:SetSize(24, 24)
-close:SetPoint("TOPRIGHT", -8, -8)
-close.label = text(close, 16, C.muted)
-close.label:SetPoint("CENTER")
-close.label:SetText("×")
-L.Script(close, "OnEnter", function() close.label:SetTextColor(C.ink[1], C.ink[2], C.ink[3]) end, "close")
-L.Script(close, "OnLeave", function() close.label:SetTextColor(C.muted[1], C.muted[2], C.muted[3]) end, "close")
-L.Script(close, "OnClick", function() panel:Hide() end, "close")
-
-local rows = {}
-for i = 1, ROWS do
-	local r = CreateFrame("Frame", nil, panel)
-	r:SetSize(W - 2 * PAD, ROWH)
-	r.bg = fill(r, C.row)
-	r.name = text(r, 13, C.ink, true)
-	r.name:SetPoint("TOPLEFT", 12, -7)
-	r.detail = text(r, 11, C.muted)
-	r.detail:SetPoint("TOPLEFT", 12, -24)
-	r.detail:SetWidth(W - 2 * PAD - 110)
-	r.detail:SetWordWrap(false)
-	r.tag = text(r, 11, C.green)
-	r.tag:SetPoint("RIGHT", -12, 0)
-	r.tag:SetJustifyH("RIGHT")
-	r.hop = pill(r, "Hop", 70, "primary", function() if r.shard then ns.Hop(r.shard) end end)
-	r.hop:SetPoint("RIGHT", -10, 0)
-	r.hop:SetMotionScriptsWhileDisabled(true)
-	L.Script(r.hop, "OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:AddLine(self:IsEnabled() and "Ask someone open on this shard to invite you"
-			or "Nobody open for invites is known on this shard", 1, 1, 1, true)
-		GameTooltip:Show()
-	end, "hop tip")
-	L.Script(r.hop, "OnLeave", function() GameTooltip:Hide() end, "hop tip")
-	r:Hide()
-	rows[i] = r
+local function place(region, y, x, parent)
+	region:ClearAllPoints()
+	region:SetPoint("TOPLEFT", parent or panel, "TOPLEFT", x or PL.pad, y)
 end
 
-local empty = CreateFrame("Frame", nil, panel)
-empty:SetSize(W - 2 * PAD, 54)
-fill(empty, C.row)
-local emptyText = text(empty, 12, C.muted)
-emptyText:SetPoint("LEFT", 12, 0)
-emptyText:SetWidth(W - 2 * PAD - 24)
-emptyText:SetText("No shard read yet. Target an NPC or move the mouse over one: Sliders reads the shard from it.")
-
-local divider = panel:CreateTexture(nil, "BORDER")
-divider:SetColorTexture(C.divider[1], C.divider[2], C.divider[3], C.divider[4])
-divider:SetHeight(1)
-
--- a segmented control like Profit Margin's tabs: one strip, the selected option in ink
-local function segmented(options, onPick)
-	local box = CreateFrame("Frame", nil, panel)
-	fill(box, C.row)
-	edge(box)
-	box.buttons = {}
-	local x = 3
-	for _, o in ipairs(options) do
-		local mode = o[1]
-		local b = pill(box, o[2], o[3], "tab", function() onPick(mode) end)
-		b:SetPoint("LEFT", x, 0)
-		x = x + o[3] + 2
-		box.buttons[mode] = b
+-- a tooltip of { text, colour } lines; the first is the heading
+local function tip(owner, lines)
+	GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+	for i, l in ipairs(lines) do
+		local c = l[2] or (i == 1 and C.white or C.ink)
+		GameTooltip:AddLine(l[1], c[1], c[2], c[3], true)
 	end
-	box:SetSize(x + 1, 28)
-	function box:Select(mode) for m, b in pairs(self.buttons) do b:SetSelected(m == mode) end end
+	GameTooltip:Show()
+end
+
+-- a small text button in the action blue (Huddle's inline invite slot, as a word); muted when it can't act, and its
+-- tooltip then says why
+local function link(parent, label, onClick, size)
+	local b = CreateFrame("Button", nil, parent)
+	b:SetSize(PL.actW, PL.row)
+	b:SetMotionScriptsWhileDisabled(true)
+	b.label = text(b, size or 11, C.action, true)
+	b.label:SetPoint("RIGHT")
+	b.label:SetJustifyH("RIGHT")
+	b.label:SetText(label)
+	b.color = C.action
+	function b:SetLabel(t) self.label:SetText(t) end
+	function b:Paint(c)
+		self.color = c or self.color
+		local live = self.color == C.action
+		local lc = (live and self.hot) and C.white or self.color
+		self.label:SetTextColor(lc[1], lc[2], lc[3])
+		if self.bg then
+			local a = C.action
+			if live then
+				self.bg:SetColorTexture(a[1], a[2], a[3], self.hot and 0.32 or 0.16)
+				for _, t in ipairs(self.edges) do t:SetColorTexture(a[1], a[2], a[3], self.hot and 0.9 or 0.55) end
+			else
+				self.bg:SetColorTexture(1, 1, 1, 0.03)
+				for _, t in ipairs(self.edges) do t:SetColorTexture(C.line[1], C.line[2], C.line[3], 1) end
+			end
+		end
+	end
+	function b:SetUsable(on) self:SetEnabled(on) self:Paint(on and C.action or C.muted) end
+	L.Script(b, "OnEnter", function(self)
+		self.hot = self:IsEnabled()
+		self:Paint()
+		if self.tip then self.tip(self) end
+	end, "link")
+	L.Script(b, "OnLeave", function(self) self.hot = false self:Paint() GameTooltip:Hide() end, "link")
+	L.Script(b, "OnClick", onClick, "link")
+	return b
+end
+
+-- a row's action as a small button: a frame and a light action-blue fill, brighter under the mouse, grey when it
+-- can't act (its tooltip then says why)
+local function framed(b)
+	b:SetSize(PL.actW, PL.actH)
+	b.bg = fill(b, C.action)
+	b.edges = edge(b, C.action)
+	b.label:ClearAllPoints()
+	b.label:SetPoint("CENTER", 0, 0)
+	b.label:SetJustifyH("CENTER")
+	b:Paint()
+	return b
+end
+
+-- why Ask / Hop can't act right now (nil: they can); the same checks ns.Ask and ns.Hop make, said before the click
+local function blockReason()
+	if hop then return "A hop is running: wait for its result." end
+	if A.instanced() or A.paused() then return "Only in the open world: shards are read there." end
+	if not A.current() then return "Your shard is not read yet: look at an NPC or two." end
+	if A.inGroup() then return "You are in a group: a hop works by invite, so leave it first." end
+	if L.InCombat() then return "Not in combat." end
+	if A.lockdown() then return "Chat is locked right now (a boss fight or a rated match)." end
+end
+ns.blockReason = blockReason
+
+-- the title bar: zone, your shard (green), the gear, x
+local title = text(panel, 13, C.ink, true)
+title:SetPoint("TOPLEFT", PL.pad, -8)
+local titleShard = text(panel, 12, C.green, true)
+titleShard:SetPoint("LEFT", title, "RIGHT", 6, 0)
+local close = link(panel, "x", function() panel:Hide() end, 13)
+close:SetSize(16, 18)
+close:SetPoint("TOPRIGHT", -6, -5)
+close:Paint(C.muted)
+close.tip = function(self) tip(self, { { "Close" }, { "Escape closes it too.", C.muted } }) end
+
+local gear = CreateFrame("Button", nil, panel)
+gear:SetSize(15, 15)
+gear:SetPoint("RIGHT", close, "LEFT", -6, 0)
+gear.tex = gear:CreateTexture(nil, "ARTWORK")
+gear.tex:SetAllPoints()
+if not pcall(gear.tex.SetAtlas, gear.tex, "gear") then gear.tex:SetColorTexture(C.muted[1], C.muted[2], C.muted[3], 1) end
+function gear:Paint()
+	local on = self.active or self.hot
+	self.tex:SetDesaturated(not on)
+	self.tex:SetAlpha(on and 1 or 0.6)
+end
+L.Script(gear, "OnEnter", function(self)
+	self.hot = true self:Paint()
+	tip(self, { { "Settings" }, { "Open for hop invites, what happens when someone asks, the Ask whisper, what Sliders shows.", C.muted } })
+end, "gear")
+L.Script(gear, "OnLeave", function(self) self.hot = false self:Paint() GameTooltip:Hide() end, "gear")
+L.Script(gear, "OnClick", function() ns.ToggleSettings() end, "gear")
+gear:Paint()
+
+local status = text(panel, 10.5, C.muted)
+status:SetWidth(PL.width - 2 * PL.pad)
+
+-- a list of one-line rows, at most maxRows shown; the wheel scrolls, a thin line shows where; each row's tooltip
+-- comes from rowTip(row, item)
+local function list(maxRows, build, draw, rowTip)
+	local box = CreateFrame("Frame", nil, panel)
+	box:SetSize(PL.width - 2 * PL.pad, PL.row)
+	box:EnableMouseWheel(true)
+	box.rows, box.offset = {}, 0
+	box.thumb = box:CreateTexture(nil, "OVERLAY")
+	box.thumb:SetColorTexture(1, 1, 1, 0.25)
+	box.thumb:SetWidth(PL.thumb)
+	for i = 1, maxRows do
+		local r = CreateFrame("Frame", nil, box)
+		r:SetHeight(PL.row)
+		r:SetPoint("TOPLEFT", box, "TOPLEFT", 0, -(i - 1) * PL.row)
+		r:SetPoint("RIGHT", box, "RIGHT", -(PL.thumb + 2), 0)
+		local stripe = r:CreateTexture(nil, "BACKGROUND")
+		stripe:SetAllPoints()
+		stripe:SetColorTexture(1, 1, 1, (i % 2 == 0) and 0.035 or 0)
+		r.hover = r:CreateTexture(nil, "BACKGROUND")
+		r.hover:SetAllPoints()
+		r.hover:SetColorTexture(1, 1, 1, 0.06)
+		r.hover:Hide()
+		r:EnableMouse(true)
+		L.Script(r, "OnEnter", function(self)
+			self.hover:Show()
+			if self.item and rowTip then rowTip(self, self.item) end
+		end, "row")
+		L.Script(r, "OnLeave", function(self) self.hover:Hide() GameTooltip:Hide() end, "row")
+		build(r)
+		r:Hide()
+		box.rows[i] = r
+	end
+	function box:Fill(items)
+		local maxOff = math.max(#items - maxRows, 0)
+		if self.offset > maxOff then self.offset = maxOff end
+		local n = math.min(#items, maxRows)
+		for i = 1, maxRows do
+			local r, it = self.rows[i], items[self.offset + i]
+			r.item = it
+			r:SetShown(it ~= nil)
+			if it then draw(r, it) end
+		end
+		if #items > maxRows then
+			local h = n * PL.row
+			local size = math.max(h * maxRows / #items, 8)
+			self.thumb:SetHeight(size)
+			self.thumb:ClearAllPoints()
+			self.thumb:SetPoint("TOPRIGHT", self, "TOPRIGHT", 0, -((h - size) * self.offset / maxOff))
+			self.thumb:Show()
+		else
+			self.thumb:Hide()
+		end
+		self:SetHeight(math.max(n, 1) * PL.row)
+		self:SetShown(n > 0)
+		return n * PL.row
+	end
+	L.Script(box, "OnMouseWheel", function(self, delta)
+		self.offset = math.max(self.offset - delta * 2, 0)
+		ns.RefreshPanel()
+	end, "wheel")
 	return box
 end
 
-local openLabel = text(panel, 10.5, C.gold, true)
-openLabel:SetText("OPEN FOR HOP INVITES")
-local openSeg = segmented({ { "off", "Off", 70 }, { "solo", "When solo", 96 }, { "group", "When my party has room", 170 } },
-	function(mode)
-		if not char then return end
-		char.open = mode
-		log("open " .. mode)
-		refreshOpen()
-	end)
-local inviteLabel = text(panel, 10.5, C.gold, true)
-inviteLabel:SetText("WHEN SOMEONE ASKS TO HOP")
-local inviteSeg = segmented({ { "ask", "Ask everyone", 104 }, { "friends", "Invite friends, ask others", 170 },
-	{ "anyone", "Invite anyone", 110 } }, function(mode)
-	if not char then return end
-	char.invite = mode
-	log("invite " .. mode)
-	ns.RefreshPanel()
-end)
-local hint = text(panel, 10, C.muted)
-hint:SetWidth(W - 2 * PAD)
-
-local function place(region, y, x)
-	region:ClearAllPoints()
-	region:SetPoint("TOPLEFT", panel, "TOPLEFT", x or PAD, y)
+local function column(r, size, color, x, w)
+	local fs = text(r, size, color)
+	fs:SetPoint("LEFT", r, "LEFT", x, 0)
+	if w then fs:SetWidth(w) end
+	if fs.SetWordWrap then fs:SetWordWrap(false) end
+	return fs
 end
 
-local function ago(t) return t < 90 and "now" or (A.age(t) .. " ago") end
+local function paint(fs, c) fs:SetTextColor(c[1], c[2], c[3]) end
+
+-- readable ages: now, 13 min, 16 h, 2 d (never "966 min")
+local function shortAge(sec)
+	sec = math.max(0, math.floor(sec))
+	if sec < 90 then return "now" end
+	if sec < 90 * 60 then return math.floor(sec / 60 + 0.5) .. " min" end
+	if sec < 36 * 3600 then return math.floor(sec / 3600 + 0.5) .. " h" end
+	return math.floor(sec / 86400 + 0.5) .. " d"
+end
+ns.shortAge = shortAge
+local function ago(sec) local a = shortAge(sec) return a == "now" and "a moment ago" or (a .. " ago") end
+
+-- (1) people in this zone: name | source | shard | Ask / Hop ("here" when they are on yours)
+local SRC = { ["Battle.net friend"] = "BN", friend = "friend", guild = "guild" }
+local SRC_LONG = { ["Battle.net friend"] = "Battle.net friend", friend = "Friend", guild = "Guild" }
+local function hopsTo(p) return p.sliders and p.open and p.shard end
+-- "BN · guild" (short) / "Battle.net friend · Guild" (the tooltip): every list that names this character
+local function sources(p, names)
+	local out = {}
+	for _, s in ipairs(p.sources or { p.source }) do out[#out + 1] = names[s] or s end
+	return table.concat(out, " · ")
+end
+local matesLabel = text(panel, 10, C.gold, true)
+local matesNone = text(panel, 10.5, C.muted)
+matesNone:SetWidth(PL.width - 2 * PL.pad)
+local mates = list(PL.people, function(r)
+	r.name = column(r, 12, C.ink, 0, PL.nameW)
+	r.src = column(r, 10.5, C.muted, PL.nameW + PL.gap, PL.srcW)
+	r.shard = column(r, 11, C.muted, PL.nameW + PL.srcW + 2 * PL.gap, PL.shardW)
+	r.act = link(r, "Ask", function()
+		local p = r.item
+		if not p then return end
+		if hopsTo(p) then ns.Hop(p.shard) else ns.Ask(p) end
+	end)
+	framed(r.act)
+	r.act:SetPoint("RIGHT", r, "RIGHT", -1, 0)
+	r.act.tip = function(self)
+		local p = r.item
+		if not p then return end
+		if self.why then tip(self, { { self.why } }) return end
+		if hopsTo(p) then
+			tip(self, { { ("Hop to %s's shard"):format(p.name) },
+				{ "They run Sliders and are open: Sliders asks, they invite, the server moves you.", C.muted } })
+		else
+			tip(self, { { ("Ask %s for an invite"):format(p.name) }, { "Whispers: \"" .. ns.AskText() .. "\"" },
+				{ "Their invite is accepted, the server moves you onto their shard, you stay in their group.", C.muted } })
+		end
+	end
+end, function(r, p)
+	local cur, why = A.current(), blockReason()
+	local mine = p.shard ~= nil and p.shard == cur
+	r.name:SetText(ns.classColored(p.name, p.class))
+	r.src:SetText(sources(p, SRC))
+	r.shard:SetText(p.shard and A.serverOf(p.shard) or "?")
+	paint(r.shard, mine and C.green or (p.shard and C.ink or C.muted))
+	if mine then
+		r.act:SetLabel("here")
+		r.act:SetUsable(false)
+		r.act.why = ("%s is on your shard."):format(p.name)
+	else
+		r.act:SetLabel(hopsTo(p) and "Hop" or "Ask")
+		r.act:SetUsable(why == nil)
+		r.act.why = why
+	end
+end, function(r, p)
+	local cur = A.current()
+	local where = p.shard and ("shard %s%s"):format(A.serverOf(p.shard), p.shard == cur and " (yours)" or "") or "shard unknown"
+	tip(r, { { ns.classColored(p.name, p.class) }, { sources(p, SRC_LONG) .. " · " .. where },
+		p.sliders and { ("Sliders %s · %s"):format(p.version or "?", p.open and "open for hop invites" or "not open for hop invites"), C.muted }
+		or { "No Sliders: Ask whispers them for an invite.", C.muted } })
+end)
+
+-- (2) shards of this zone: shard | when | who | Hop
+local shardsLabel = text(panel, 10, C.gold, true)
+ns.panelLabels = { mates = matesLabel, shards = shardsLabel }   -- for the harness: which section comes first
+local shardsNone = text(panel, 10.5, C.muted)
+shardsNone:SetWidth(PL.width - 2 * PL.pad)
+local whoW = PL.width - 2 * PL.pad - PL.shardW - PL.whenW - PL.actW - 3 * PL.gap - PL.thumb - 2
+local shards = list(PL.shards, function(r)
+	r.name = column(r, 12, C.ink, 0, PL.shardW)
+	r.when = column(r, 10.5, C.muted, PL.shardW + PL.gap, PL.whenW)
+	r.who = column(r, 10.5, C.muted, PL.shardW + PL.whenW + 2 * PL.gap, whoW)
+	r.act = link(r, "Hop", function() if r.item then ns.Hop(r.item.shard) end end)
+	framed(r.act)
+	r.act:SetPoint("RIGHT", r, "RIGHT", -1, 0)
+	r.act.tip = function(self)
+		local e = r.item
+		if not e then return end
+		if self.why then tip(self, { { self.why } }) return end
+		local open = {}
+		for _, p in ipairs(e.people) do if p.st and p.st.open then open[#open + 1] = p.name end end
+		tip(self, { { ("Hop to %s"):format(A.serverOf(e.shard)) },
+			{ ("Sliders asks %s to invite you; the server moves you."):format(table.concat(open, " or ")), C.muted } })
+	end
+end, function(r, e)
+	r.name:SetText(A.serverOf(e.shard))
+	paint(r.name, e.you and C.green or C.ink)
+	r.when:SetText(e.you and "you" or (#e.people > 0 and "now") or (e.seen and shortAge(A.stamp() - e.seen)) or "")
+	local who = {}
+	for _, p in ipairs(e.people) do if p.friend then who[#who + 1] = ns.classColored(p.name, p.class) end end
+	local others = #e.people - #who
+	if others > 0 then who[#who + 1] = others .. " more" end
+	local s = table.concat(who, ", ")
+	if e.crowd then s = s .. (s ~= "" and " · " or "") .. e.crowd .. " players" end
+	r.who:SetText(s)
+	local canHop = not e.you and e.open > 0
+	r.act:SetShown(canHop)
+	if canHop then
+		local why = blockReason()
+		r.act:SetUsable(why == nil)
+		r.act.why = why
+	end
+end, function(r, e)
+	local lines = { { A.label(e.shard) },
+		{ e.you and "You are here." or (e.seen and ("You were here %s."):format(ago(A.stamp() - e.seen))) or "You have not been here." } }
+	if e.crowd then lines[#lines + 1] = { ("%d players seen on it."):format(e.crowd), C.muted } end
+	for _, p in ipairs(e.people) do
+		lines[#lines + 1] = { ns.classColored(p.name, p.class) .. (p.st and p.st.open and "  |cff66d966open|r" or "") }
+	end
+	tip(r, lines)
+end)
+
+-- (3) the status line: a hop in progress, its result for 2 min, why the shard is unknown, else whether you are open
+local OPEN_SAY = { solo = "Open for hop invites when solo", group = "Open for hop invites when your party has room" }
+local INVITE_SAY = { ask = "asks you", friends = "friends at once", anyone = "anyone at once" }
+local function statusLine()
+	if hop then
+		-- in their group (whoever invited, Sliders or a click): the wait is for the move now
+		if hop.phase == "joined" or hop.phase == "moved" then
+			return ("In %s's group; waiting for the move..."):format(hop.inviter or hop.host.name), C.action
+		end
+		if hop.phase == "accepting" then
+			return ("%s invited you; joining..."):format(hop.inviter or hop.host.name), C.action
+		end
+		-- the asked friend passed it on to their group's leader (the suggest line)
+		if hop.ask and type(hop.leader) == "string" then
+			return ("%s asked %s (leader) to invite you..."):format(hop.host.name, hop.leader), C.action
+		elseif hop.ask and hop.leader == true then
+			return ("%s asked their group's leader to invite you..."):format(hop.host.name), C.action
+		end
+		return hop.ask and ("Asked %s; waiting for the invite..."):format(hop.host.name)
+			or ("Asking %s to invite you..."):format(hop.host.name), C.action
+	end
+	local r = ns.lastResult
+	if r and now() - r.t < 120 then return (r.text:gsub("^%l", string.upper)), r.ok and C.green or C.warn end
+	if A.instanced() or A.paused() then return "Shards are read in the open world only.", C.muted end
+	if not A.current() then return "Your shard is not read yet: look at an NPC or two.", C.muted end
+	local mode = char and char.open or "off"
+	local s = OPEN_SAY[mode] and (OPEN_SAY[mode] .. ((closedWhy("direct") and " (paused now)") or "") .. " · "
+		.. INVITE_SAY[char.invite or "ask"]) or "Not open for hop invites"
+	local newest = ns.newestFriendVersion()
+	if newest then s = s .. (" · Sliders %s is out"):format(newest) end
+	return s, C.muted
+end
 
 -- shard -> { shard, you, seen (stamp), people = { contact }, open = n, crowd }
 function ns.Shards()
@@ -1066,9 +1569,12 @@ function ns.Shards()
 			end
 		end
 	end
+	local counted = {}   -- shard .. identity: a character known by two routes (Battle.net and the guild) counts once
 	for _, c in pairs(contacts) do
 		local st = c.st
-		if st and st.shard and st.map == map and current(c) then
+		local once = st and st.shard and (st.shard .. "|" .. (A.ident(c.full) or c.key))
+		if once and st.map == map and current(c) and not counted[once] then
+			counted[once] = true
 			local e = get(st.shard)
 			e.people[#e.people + 1] = c
 			if st.open then e.open = e.open + 1 end
@@ -1086,89 +1592,274 @@ function ns.Shards()
 	return list
 end
 
-local WHY_CLOSED = { busy = "Open for invites is paused right now: an instance, a flight, away, your party is queued,"
-	.. " or the game is about to move you to another shard.",
-	full = "Open for invites is paused right now: you are in a group (or it has no room, or you don't lead it)." }
-
-function ns.RefreshPanel()
-	if not panel:IsShown() then return end
-	local map, cur = A.mapID(), A.current()
-	title:SetText(A.mapName(map))
-	local list = ns.Shards()
-	sub:SetText(cur and ("You are on %s · %d players seen in 5 min · %d %s known here"):format(A.label(cur),
-		ns.crowd(), #list, #list == 1 and "shard" or "shards") or "Your shard here is not read yet.")
-	local y = -78
-	empty:SetShown(#list == 0)
-	if #list == 0 then
-		place(empty, y)
-		y = y - 54 - 4
+-- (4) the settings: their own small window beside the panel (the gear, /sliders settings), its own x; Escape closes it.
+-- alcaras (2026-11-14): "these should look like buttons, think about good ux design": every choice is a real button
+-- in a segmented row (a frame and a background on each, the chosen one lit like AlcUpgrades' active tab: a light
+-- background, an action-blue underline and edge, the bright label; the others dimmed but button-shaped; a hover
+-- highlight), the toggles are checkboxes, the Ask whisper an edit box with a visible frame. Hierarchy: section labels
+-- gold and bold, help small and grey under the control it explains.
+local SET = { width = PL.setWidth, segH = 22, segPad = 10, segGap = 3, check = 14, checkRow = 20, editH = 22,
+	head = 16, afterHead = 2, afterControl = 4, help = 13, section = 12 }
+local settings = card("SlidersSettings", SET.width, 200)
+settings:SetClampedToScreen(true)
+tinsert(UISpecialFrames, "SlidersSettings")
+do
+	local SW = SET.width - 2 * PL.pad
+	local st = text(settings, 13, C.ink, true)
+	st:SetPoint("TOPLEFT", PL.pad, -8)
+	st:SetText("Sliders settings")
+	local x = link(settings, "x", function() settings:Hide() end, 13)
+	x:SetSize(16, 18)
+	x:SetPoint("TOPRIGHT", -6, -5)
+	x:Paint(C.muted)
+	x.tip = function(self) tip(self, { { "Close" }, { "Escape closes it too.", C.muted } }) end
+	local y = -PL.top - 2
+	local function heading(label)
+		local h = text(settings, 10.5, C.gold, true)
+		place(h, y, nil, settings)
+		h:SetText(label)
+		y = y - SET.head - SET.afterHead
 	end
-	for i = 1, ROWS do
-		local r, e = rows[i], list[i]
-		r.shard = e and e.shard
-		r:SetShown(e ~= nil)
-		if e then
-			place(r, y)
-			y = y - ROWH - 4
-			local who, strangers = {}, 0
-			for _, c in ipairs(e.people) do
-				if c.friend then who[#who + 1] = ns.classColored(c.name, c.class) .. (c.st.open and " (open)" or "")
-					.. ((c.version and c.version ~= VERSION) and (" (" .. c.version .. ")") or "")
-				else strangers = strangers + 1 end
+	local function help(fs)
+		place(fs, y, nil, settings)
+		fs:SetWidth(SW)
+		y = y - SET.help
+	end
+	settings.options, settings.helps = {}, {}
+
+	-- a segmented row: one button per choice, stretched to the window's width, equal heights; the help line under it
+	-- says what the chosen one does
+	local function segmented(options, get, set)
+		local buttons, natural, total = {}, {}, 0
+		for i, o in ipairs(options) do
+			local key = o[1]
+			local b = CreateFrame("Button", nil, settings)
+			b.bg = fill(b, { 1, 1, 1, 0.04 })
+			b.edges = edge(b, C.line)
+			b.under = b:CreateTexture(nil, "ARTWORK")
+			b.under:SetHeight(2)
+			b.under:SetPoint("BOTTOMLEFT", 1, 1)
+			b.under:SetPoint("BOTTOMRIGHT", -1, 1)
+			b.under:SetColorTexture(C.action[1], C.action[2], C.action[3], 1)
+			b.label = text(b, 11.5, C.muted, true)
+			b.label:SetPoint("CENTER", 0, 1)
+			b.label:SetJustifyH("CENTER")
+			b.label:SetText(o[2])
+			b.key, b.note = key, o[3]
+			natural[i] = math.ceil(L.Num(b.label:GetStringWidth()) or 40) + 2 * SET.segPad
+			total = total + natural[i]
+			function b:Paint()
+				local on = get() == key
+				self.on = on
+				self.bg:SetColorTexture(1, 1, 1, on and 0.13 or (self.hot and 0.08 or 0.04))
+				local e = on and C.action or (self.hot and C.muted or C.line)
+				for _, t in ipairs(self.edges) do t:SetColorTexture(e[1], e[2], e[3], on and 0.8 or 1) end
+				self.under:SetShown(on)
+				paint(self.label, on and C.white or (self.hot and C.ink or C.muted))
 			end
-			if strangers > 0 then who[#who + 1] = strangers .. " more with Sliders" end
-			local parts = {}
-			if #who > 0 then parts[#parts + 1] = table.concat(who, ", ") end
-			if e.crowd then parts[#parts + 1] = e.crowd .. " players seen" end
-			if not e.you and #e.people == 0 and e.seen then parts[#parts + 1] = "you were here " .. ago(A.stamp() - e.seen) end
-			r.name:SetText(A.label(e.shard))
-			r.detail:SetText(#parts > 0 and table.concat(parts, " · ") or "nobody with Sliders known here")
-			if e.you then
-				r.bg:SetColorTexture(C.rowYou[1], C.rowYou[2], C.rowYou[3], C.rowYou[4])
-				r.tag:SetText("you are here")
-				r.tag:Show()
-				r.hop:Hide()
-			else
-				r.bg:SetColorTexture(C.row[1], C.row[2], C.row[3], C.row[4])
-				r.tag:Hide()
-				r.hop:Show()
-				r.hop:SetUsable(e.open > 0 and not hop)
-			end
+			L.Script(b, "OnEnter", function(self)
+				self.hot = true self:Paint()
+				tip(self, { { o[2] }, { o[3], C.muted } })
+			end, "segment")
+			L.Script(b, "OnLeave", function(self) self.hot = false self:Paint() GameTooltip:Hide() end, "segment")
+			L.Script(b, "OnClick", function() set(key) ns.RefreshPanel() end, "segment")
+			buttons[i] = b
+			settings.options[#settings.options + 1] = b
+		end
+		local extra = math.max(SW - total - SET.segGap * (#buttons - 1), 0) / #buttons
+		local xo = PL.pad
+		for i, b in ipairs(buttons) do
+			local w = math.floor(natural[i] + extra)
+			if i == #buttons then w = PL.pad + SW - xo end   -- the last one ends flush with the window's edge
+			b:SetSize(w, SET.segH)
+			place(b, y, xo, settings)
+			xo = xo + w + SET.segGap
+		end
+		y = y - SET.segH - SET.afterControl
+		local h = text(settings, 10, C.muted)
+		help(h)
+		settings.helps[#settings.helps + 1] = function()
+			local k = get()
+			for _, o in ipairs(options) do if o[1] == k then h:SetText(o[3]) end end
 		end
 	end
-	y = y - 10
-	divider:ClearAllPoints()
-	divider:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, y)
-	divider:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -PAD, y)
-	y = y - 14
-	place(openLabel, y)
-	place(openSeg, y - 16)
-	y = y - 16 - 28 - 12
-	place(inviteLabel, y)
-	place(inviteSeg, y - 16)
-	y = y - 16 - 28 - 14
-	local mode = char and char.open or "off"
-	openSeg:Select(mode)
-	inviteSeg:Select(char and char.invite or "ask")
-	local why = mode ~= "off" and closedWhy("direct") or nil
-	if hop then
-		hint:SetText(("Hop: asking %s to invite you to %s..."):format(hop.host.name, A.label(hop.shard)))
-		hint:SetTextColor(C.action[1], C.action[2], C.action[3])
-	else
-		local newest = ns.newestFriendVersion()
-		hint:SetText(newest and ("A friend runs Sliders %s (you have %s): github.com/alcaras/sliders/releases."):format(newest, VERSION)
-			or why and WHY_CLOSED[why] or "Hop asks a friend who is open for invites on that shard to invite you; "
-			.. "the server moves you, and Sliders leaves the group for you a few seconds later.")
-		hint:SetTextColor(C.muted[1], C.muted[2], C.muted[3])
+
+	-- a checkbox line: a framed box with Blizzard's minimal check when on, the label, a short grey note; the whole line
+	-- is the click target and lights under the mouse
+	local function checkbox(label, note, isOn, toggle)
+		local b = CreateFrame("Button", nil, settings)
+		b:SetSize(SW, SET.checkRow)
+		place(b, y, nil, settings)
+		y = y - SET.checkRow
+		b.hl = fill(b, { 1, 1, 1, 0 })
+		b.box = CreateFrame("Frame", nil, b)
+		b.box:SetSize(SET.check, SET.check)
+		b.box:SetPoint("LEFT", 2, 0)
+		fill(b.box, { 0, 0, 0, 0.35 })
+		b.edges = edge(b.box, C.muted)
+		b.check = b.box:CreateTexture(nil, "OVERLAY")
+		if pcall(b.check.SetAtlas, b.check, "checkmark-minimal") then
+			b.check:SetSize(SET.check, SET.check)
+			b.check:SetPoint("CENTER")
+		else
+			b.check:SetPoint("TOPLEFT", 3, -3)
+			b.check:SetPoint("BOTTOMRIGHT", -3, 3)
+			b.check:SetColorTexture(C.action[1], C.action[2], C.action[3], 1)
+		end
+		b.label = text(b, 11.5, C.ink)
+		b.label:SetPoint("LEFT", b.box, "RIGHT", 8, 0)
+		b.label:SetText(label)
+		b.note = text(b, 10, C.muted)
+		b.note:SetPoint("LEFT", b.label, "RIGHT", 8, 0)
+		b.note:SetText(note or "")
+		function b:Paint()
+			local on = isOn() and true or false
+			self.on = on
+			self.check:SetShown(on)
+			self.hl:SetColorTexture(1, 1, 1, self.hot and 0.05 or 0)
+			local e = on and C.action or (self.hot and C.ink or C.muted)
+			for _, t in ipairs(self.edges) do t:SetColorTexture(e[1], e[2], e[3], 1) end
+			paint(self.label, self.hot and C.white or C.ink)
+		end
+		L.Script(b, "OnEnter", function(self) self.hot = true self:Paint() end, "checkbox")
+		L.Script(b, "OnLeave", function(self) self.hot = false self:Paint() end, "checkbox")
+		L.Script(b, "OnClick", function() toggle() ns.RefreshPanel() end, "checkbox")
+		settings.options[#settings.options + 1] = b
 	end
-	place(hint, y)
-	panel:SetHeight(-y + math.ceil(hint:GetStringHeight() or 12) + 14)
+
+	local function setOpen(k) if char then char.open = k log("open " .. k) refreshOpen() end end
+	local function setInvite(k) if char then char.invite = k log("invite " .. k) end end
+	heading("OPEN FOR HOP INVITES")
+	segmented({ { "off", "Off", "Nobody can ask you to invite them." },
+		{ "solo", "When solo", "Friends and guild can ask while you are alone." },
+		{ "group", "When my party has room", "Also while you lead a party with room; never a raid, an instance or a BG." } },
+		function() return char and char.open or "off" end, setOpen)
+	y = y - SET.section
+	heading("WHEN SOMEONE ASKS")
+	segmented({ { "ask", "Ask me", "A small popup for each request: Invite or No." },
+		{ "friends", "Friends at once", "Friends and guild are invited at once; others get the popup." },
+		{ "anyone", "Anyone at once", "Everyone who asks is invited at once, no popup." } },
+		function() return char and char.invite or "ask" end, setInvite)
+	y = y - SET.section
+	heading("ASK WHISPER")
+	-- an edit box with a visible frame (darker inside, the edge lights under the mouse and while typing)
+	local ask = CreateFrame("EditBox", nil, settings)
+	ask:SetSize(SW, SET.editH)
+	place(ask, y, nil, settings)
+	ask:SetAutoFocus(false)
+	ask:SetMaxLetters(240)
+	ask:SetTextInsets(6, 6, 0, 0)
+	ask:SetFontObject(GameFontHighlightSmall)
+	if CALIBRI then pcall(ask.SetFont, ask, FONT, 11, "") end
+	ask:SetTextColor(C.ink[1], C.ink[2], C.ink[3])
+	fill(ask, { 0, 0, 0, 0.4 })
+	local askEdges = edge(ask, C.muted)
+	local function paintAsk(self)
+		local e = self:HasFocus() and C.action or (self.hot and C.ink or C.muted)
+		for _, t in ipairs(askEdges) do t:SetColorTexture(e[1], e[2], e[3], 1) end
+	end
+	local function saveAsk(self)
+		local t = ((self:GetText() or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+		if ns.db then ns.db.askText = (t ~= "" and t ~= ASK_TEXT) and t or nil end
+		self:SetText(ns.AskText())
+		paintAsk(self)
+	end
+	L.Script(ask, "OnEnterPressed", function(self) self:ClearFocus() end, "asktext")
+	L.Script(ask, "OnEscapePressed", function(self) self:SetText(ns.AskText()) self:ClearFocus() end, "asktext")
+	L.Script(ask, "OnEditFocusLost", saveAsk, "asktext")
+	L.Script(ask, "OnEditFocusGained", paintAsk, "asktext")
+	L.Script(ask, "OnEnter", function(self) self.hot = true paintAsk(self) end, "asktext")
+	L.Script(ask, "OnLeave", function(self) self.hot = false paintAsk(self) end, "asktext")
+	settings.ask = ask
+	y = y - SET.editH - SET.afterControl
+	local askHelp = text(settings, 10, C.muted)
+	help(askHelp)
+	askHelp:SetText("What Ask whispers. Click to edit; Enter keeps it, Esc undoes, empty = the default.")
+	y = y - SET.section
+	heading("SHOW")
+	checkbox("Shard line", "right-click it to move it", function() return ns.db and ns.db.shown end,
+		function() if ns.setLineShown then ns.setLineShown(not (ns.db and ns.db.shown)) end end)
+	checkbox("Minimap button", nil, function() return ns.db and type(ns.db.minimap) == "table" and not ns.db.minimap.hide end,
+		function() if ns.setMinimapShown then ns.setMinimapShown(ns.db and type(ns.db.minimap) == "table" and ns.db.minimap.hide) end end)
+	checkbox("Chat lines", "each step in chat, for testing", function() return ns.db and ns.db.chat end,
+		function() if ns.db then ns.db.chat = not ns.db.chat end end)
+	settings:SetHeight(-y + PL.pad)
+end
+
+function ns.RefreshSettings()
+	if not settings:IsShown() then return end
+	for _, b in ipairs(settings.options) do b:Paint() end
+	for _, f in ipairs(settings.helps) do f() end
+	if not settings.ask:HasFocus() then settings.ask:SetText(ns.AskText()) end
+end
+
+-- beside the panel (left of it when there is no room on the right), else where the panel would open
+local function placeSettings()
+	settings:ClearAllPoints()
+	if panel:IsShown() then
+		local right, width = L.Num(panel:GetRight()), L.Num(UIParent:GetWidth())
+		if right and width and right + PL.setWidth + 6 > width then settings:SetPoint("TOPRIGHT", panel, "TOPLEFT", -6, 0)
+		else settings:SetPoint("TOPLEFT", panel, "TOPRIGHT", 6, 0) end
+	else
+		settings:SetPoint("TOP", UIParent, "TOP", 0, -170)
+	end
+end
+
+function ns.ToggleSettings(on)
+	if on == nil then on = not settings:IsShown() end
+	if on then placeSettings() settings:Show() else settings:Hide() end
+	ns.RefreshPanel()
+end
+
+function ns.RefreshPanel()
+	ns.RefreshSettings()
+	if not panel:IsShown() then return end
+	local map, cur = A.mapID(), A.current()
+	local zone = A.mapName(map)
+	title:SetText(zone or "?")
+	titleShard:SetText(cur and A.serverOf(cur) or "?")
+	paint(titleShard, cur and C.green or C.muted)
+	gear.active = settings:IsShown()
+	gear:Paint()
+	local s, c = statusLine()
+	status:SetText(s)
+	paint(status, c)
+	place(status, -PL.top + 2)
+	local y = -PL.top + 2 - math.ceil(status:GetStringHeight() or 12) - 8
+	place(matesLabel, y)
+	matesLabel:SetText("FRIENDS AND GUILD HERE")
+	y = y - PL.head
+	local people = ns.ZoneMates()
+	matesNone:SetShown(#people == 0)
+	if #people == 0 then
+		place(matesNone, y)
+		matesNone:SetText(("None of your friends or guild are online in %s."):format(zone or "this zone"))
+		y = y - PL.row
+	end
+	place(mates, y)
+	y = y - mates:Fill(people) - 8
+	place(shardsLabel, y)
+	shardsLabel:SetText("SHARDS HERE")
+	y = y - PL.head
+	local known = ns.Shards()
+	shardsNone:SetShown(#known == 0)
+	if #known == 0 then
+		place(shardsNone, y)
+		shardsNone:SetText("None known yet: Sliders reads shards from the NPCs you look at.")
+		y = y - PL.row
+	end
+	place(shards, y)
+	y = y - shards:Fill(known)
+	panel:SetHeight(-y + PL.pad)
 end
 
 function ns.TogglePanel()
 	if panel:IsShown() then panel:Hide() return end
 	if ns.db and ns.db.panelPos then L.RestorePoint(panel, ns.db.panelPos, function(f) f:SetPoint("TOP", UIParent, "TOP", 0, -170) end) end
+	if C_GuildInfo and C_GuildInfo.GuildRoster and L.Read(IsInGuild) == true then pcall(C_GuildInfo.GuildRoster) end
+	ns.ForgetZoneMates()
 	panel:Show()
+	if settings:IsShown() then placeSettings() end
 	-- opening the panel asks guild and channel who is here (at most once per 2 min)
 	for _, kind in ipairs({ "GUILD", "CHANNEL" }) do
 		if now() - (lastAsk[kind] or -1e9) >= SPAM.askEvery and now() - (lastSent[kind] or -1e9) >= every(kind)
@@ -1179,7 +1870,16 @@ function ns.TogglePanel()
 	end
 	ns.RefreshPanel()
 end
+ns.panelLists = { mates = mates, shards = shards }                    -- for the harness
+function ns.panelStatus() return status:GetText() end                 -- for the harness
+function ns.panelEmpty()
+	return { mates = matesNone:IsShown() and matesNone:GetText() or "", shards = shardsNone:IsShown() and shardsNone:GetText() or "" }
+end
+ns.panel, ns.settings, ns.gear = panel, settings, gear
 L.Script(panel, "OnShow", function() ns.RefreshPanel() end, "panel")
+L.Script(panel, "OnHide", function() settings:Hide() end, "panel")   -- the settings go with the panel they sit beside
+L.Script(settings, "OnShow", function() ns.RefreshSettings() end, "settings")
+L.Script(settings, "OnHide", function() if settings.ask:HasFocus() then settings.ask:ClearFocus() end ns.RefreshPanel() end, "settings")
 
 end   -- buildUI
 do
@@ -1227,6 +1927,9 @@ ns.hooks.load = function()
 end
 
 -- ---------------------------------------------------------------- slash
+ns.commands.settings = function()
+	if ns.ToggleSettings then ns.ToggleSettings() else P("the settings window is not available: " .. tostring(uiError)) end
+end
 ns.commands.shards = function()
 	if ns.TogglePanel then ns.TogglePanel() else P("the Shards panel is not available: " .. tostring(uiError)) end
 end
@@ -1250,10 +1953,24 @@ ns.commands.invite = function(arg)
 	if ns.RefreshPanel then ns.RefreshPanel() end
 	P(INVITE_SAY[char.invite])
 end
+ns.commands.asktext = function(arg)
+	local db = ns.db
+	if not db then return end
+	if arg == "reset" then db.askText = nil
+	elseif arg ~= "" then db.askText = arg end
+	P("Ask whispers: " .. ns.AskText())
+end
+function ns.setMinimapShown(on)
+	if not (dbi and ns.db) then return false end
+	ns.db.minimap.hide = not on
+	if on then dbi:Show("Sliders") else dbi:Hide("Sliders") end
+	if ns.RefreshSettings then ns.RefreshSettings() end
+	return true
+end
 ns.commands.minimap = function()
-	if not (dbi and ns.db) then P("no minimap button: LibDBIcon did not load.") return end
-	ns.db.minimap.hide = not ns.db.minimap.hide
-	if ns.db.minimap.hide then dbi:Hide("Sliders") else dbi:Show("Sliders") end
+	if not ns.setMinimapShown(ns.db and type(ns.db.minimap) == "table" and ns.db.minimap.hide) then
+		P("no minimap button: LibDBIcon did not load.") return
+	end
 	P(ns.db.minimap.hide and "minimap button hidden (/sliders minimap shows it)." or "minimap button shown.")
 end
 ns.commands.hop = function(arg)

@@ -104,6 +104,17 @@ local function norm(full)
 	return (name .. "-" .. r:gsub("[%s'%-]", "")):lower()
 end
 local function firstName(full) return type(full) == "string" and (full:match("^[^%s%-]+") or full) or "?" end
+-- what the panel shows: the whole name without the realm, "Crow Blackfeather" (Forever names are First Surname;
+-- alcaras 2026-11-14: "probably should show full names")
+local function shortName(full) return type(full) == "string" and (full:match("^[^%-]+") or full) or "?" end
+-- one identity per character, whichever route named it (a Battle.net friend who is also in the guild is one row): a
+-- First Surname is unique on Forever, so that name alone; a bare first name with its realm
+local function ident(full)
+	if type(full) ~= "string" then return nil end
+	local n = full:match("^[^%-]+")
+	if n and n:find("%s") then return n:lower() end
+	return norm(full)
+end
 local function ownFull()
 	local name = L.Value(L.Read(UnitName, "player"))
 	return (type(name) == "string" and name or "?") .. "-" .. realm()
@@ -204,10 +215,12 @@ local function ago(ev)
 end
 
 -- ---------------------------------------------------------------- labels ("Barrens B")
+-- the whole zone name, only a leading "The " off ("Barrens", "Mount Hyjal", "Un'Goro Crater"): 0.3.8 kept the first
+-- word of names over 10 letters, so alcaras saw "Mount 6806" (2026-11-17). Where space is short, the widget cuts by
+-- width ("..."), never by word.
 local function shortZone(name)
-	name = (name or "?"):gsub("^The ", "")
-	if #name <= 10 then return name end
-	return name:match("^(%S+)") or name
+	name = type(name) == "string" and name ~= "" and name or "?"
+	return (name:gsub("^The ", ""))
 end
 
 local function serverOf(key) return type(key) == "string" and key:match("^(%d+)") or "?" end
@@ -278,6 +291,9 @@ local function show()
 	local c = (sure and not stale()) and LAYOUT.white or LAYOUT.grey
 	text:SetText(shownLabel(key))
 	text:SetTextColor(c[1], c[2], c[3])
+	-- a long name ("Un'Goro Crater 6804") widens the line, so the unlocked box and the drag area hold all of it
+	local w = L.Num(text:GetStringWidth())
+	frame:SetWidth(math.max(LAYOUT.width, (w or 0) + 16))
 end
 ns.Text = function() return text:GetText() end
 
@@ -531,7 +547,7 @@ ns.api = {
 	serverOf = serverOf, shardOf = shardOf, current = function() return current end, inGroup = inGroup,
 	isLeader = isLeader, lockdown = lockdown, paused = paused, instanced = instanced, PREFIX = PREFIX,
 	charFriends = charFriends, bnFriends = bnFriends, groupSize = groupSize, age = age, realm = realm, norm = norm,
-	first = firstName, ownFull = ownFull,
+	first = firstName, shortName = shortName, ident = ident, ownFull = ownFull,
 }
 
 -- players seen on this shard in the last 5 minutes (target, mouseover, nameplates): how crowded it is
@@ -940,6 +956,15 @@ local function showLog(arg)
 	end
 end
 
+-- the shard line on or off (the settings window, /sliders show | hide)
+function ns.setLineShown(on)
+	if not db then return end
+	db.shown = on and true or false
+	frame:SetShown(db.shown)
+	if db.shown then show() end
+	if ns.RefreshSettings then ns.RefreshSettings() end
+end
+
 SLASH_SLIDERS1 = "/sliders"
 local commands
 commands = {
@@ -950,8 +975,8 @@ commands = {
 		log("mark " .. arg)
 		P("marked: " .. arg)
 	end,
-	hide = function() db.shown = false frame:Hide() P("the shard line is hidden (/sliders show brings it back).") end,
-	show = function() db.shown = true frame:Show() show() P("the shard line is shown.") end,
+	hide = function() ns.setLineShown(false) P("the shard line is hidden (/sliders show brings it back).") end,
+	show = function() ns.setLineShown(true) P("the shard line is shown.") end,
 	ping = ping,
 	channel = function(arg)
 		if arg == "off" then
@@ -977,6 +1002,6 @@ commands = {
 	end,
 }
 ns.commands = commands
-SlashCmdList.SLIDERS = L.Slash(commands, "/sliders: your shard | /sliders shards: the shards here, with Hop | /sliders open"
-	.. " off | solo | group | /sliders invite ask | friends | anyone | /sliders hop <server> | /sliders ping [name] | /sliders log [n]"
+SlashCmdList.SLIDERS = L.Slash(commands, "/sliders: your shard | /sliders shards: the panel (Ask, Hop) | /sliders settings | /sliders open"
+	.. " off | solo | group | /sliders invite ask | friends | anyone | /sliders hop <server> | /sliders asktext <text> | reset | /sliders ping [name] | /sliders log [n]"
 	.. " | /sliders version | /sliders mark <text> | /sliders hide | show | lock | unlock | /sliders chat on | off | /sliders channel on | off | /sliders minimap", P)
