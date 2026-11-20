@@ -1006,6 +1006,7 @@ ns.hooks.roster = function() refreshOpen() end
 -- one hello per session to every route, with my status: Sliders users answer, the rest hear nothing more
 local function hello()
 	if helloSent or not char then return end
+	if ns.away and ns.away() then return end   -- in an instance: sent on the way out (the next PLAYER_ENTERING_WORLD)
 	if blocked() then L.After(30, hello, "hello") return end
 	helloSent = true
 	local msg = hi2("direct")
@@ -1855,6 +1856,7 @@ end
 
 function ns.TogglePanel()
 	if panel:IsShown() then panel:Hide() return end
+	if ns.away and ns.away() then P("Sliders rests in instances: their shards cannot be hopped.") return end   -- typed only
 	if ns.db and ns.db.panelPos then L.RestorePoint(panel, ns.db.panelPos, function(f) f:SetPoint("TOP", UIParent, "TOP", 0, -170) end) end
 	if C_GuildInfo and C_GuildInfo.GuildRoster and L.Read(IsInGuild) == true then pcall(C_GuildInfo.GuildRoster) end
 	ns.ForgetZoneMates()
@@ -1914,6 +1916,19 @@ local function makeIcon()
 		OnTooltipShow = L.Safe("minimap tooltip", iconTooltip),
 	})
 	if obj then dbi:Register("Sliders", obj, ns.db.minimap) end
+end
+
+-- in an instance: the panel, its settings and a host popup close, the minimap button goes; on leaving the button comes
+-- back unless it was hidden by choice (db.minimap.hide is never touched here)
+ns.hooks.away = function(on)
+	if on then
+		if ns.panel then ns.panel:Hide() end
+		if ns.settings then ns.settings:Hide() end
+		if popup then popup:Hide() end
+		if dbi then pcall(dbi.Hide, dbi, "Sliders") end
+	elseif dbi and ns.db and type(ns.db.minimap) == "table" and not ns.db.minimap.hide then
+		pcall(dbi.Show, dbi, "Sliders")
+	end
 end
 
 local loadHook = ns.hooks.load

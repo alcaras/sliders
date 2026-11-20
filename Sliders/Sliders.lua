@@ -50,8 +50,12 @@ local KINDS = { Creature = true, Vehicle = true }
 
 local P = L.Printer("Sliders", "66ccff")
 local db, char
+-- in an instance (dungeon, raid, battleground, arena, scenario) Sliders is away: no line, no panel, no minimap
+-- button, nothing in chat; its shards are not the open world's and cannot be hopped (alcaras 2026-11-20: "doesn't
+-- need to show in instances and BGs"). Back as it was on leaving.
+local away = false
 -- automatic lines (a shard change, a move coming): only with /sliders chat on (Crow: nothing in chat unless asked)
-local function say(...) if db and db.chat then P(...) end end
+local function say(...) if db and db.chat and not away then P(...) end end
 
 -- ---------------------------------------------------------------- state (this session)
 local loading = true          -- between PLAYER_LEAVING_WORLD and PLAYER_ENTERING_WORLD: nothing is read
@@ -305,7 +309,7 @@ local function armStale()
 	L.After(RULE.stale + 1, function()
 		staleArmed = false
 		show()
-		if lastRead and not stale() then armStale() end
+		if lastRead and not stale() and not away then armStale() end   -- in an instance: no timer left
 	end, "stale")
 end
 
@@ -675,7 +679,7 @@ local function keyed(key, guid, npc, token, zone)
 end
 
 local function read(unit, token)
-	if loading or not char then return end
+	if loading or away or not char then return end   -- in an instance: not even counted
 	if L.Value(L.Read(UnitExists, unit)) ~= true then return end
 	local hidden = C_Secrets and C_Secrets.ShouldUnitIdentityBeSecret
 	if hidden and L.Value(L.Read(hidden, unit)) == true then count(token, "secret") return end
@@ -837,9 +841,21 @@ L.On("NAME_PLATE_UNIT_ADDED", function(_, unit)
 	if type(unit) == "string" then read(unit, "nameplate") end
 end)
 
+-- into or out of an instance: the line, and (Hop.lua's hook) the panel, the settings, a host popup, the minimap button
+local function applyAway()
+	local a = instanced() and true or false
+	if a == away then return end
+	away = a
+	if db then frame:SetShown(db.shown and not away) end
+	log(away and "away: in an instance" or "back: the open world")
+	hook("away", away)
+end
+ns.away = function() return away end
+
 L.On("PLAYER_LEAVING_WORLD", function() loading = true show() end)
 L.On("PLAYER_ENTERING_WORLD", function(_, login, reload)
 	loading = false
+	applyAway()
 	lastZone = { t = now(), what = "world" }
 	log(("world %s%s"):format(mapName(mapID()), L.Value(login) == true and " login" or (L.Value(reload) == true and " reload" or "")))
 	reset("world")
@@ -850,6 +866,7 @@ end)
 L.On("ZONE_CHANGED_NEW_AREA", function()
 	lastZone = { t = now(), what = "zone" }
 	log(("zone %s"):format(mapName(mapID())))
+	applyAway()
 	reset("zone")
 end)
 
@@ -960,7 +977,7 @@ end
 function ns.setLineShown(on)
 	if not db then return end
 	db.shown = on and true or false
-	frame:SetShown(db.shown)
+	frame:SetShown(db.shown and not away)
 	if db.shown then show() end
 	if ns.RefreshSettings then ns.RefreshSettings() end
 end
